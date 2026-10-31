@@ -26,7 +26,7 @@ export default function Login() {
       if (isAdmin) navigate('/dashboard')
       else if (hasPermission('products:read')) navigate('/products')
       else if (canSell()) navigate('/pos')
-      else navigate('/')
+      else navigate('/no-access')
     }
     else setError('Credenciales inválidas')
   }
@@ -34,43 +34,25 @@ export default function Login() {
   return (
     <div className="login-shell">
       <div className="login-backdrop" aria-hidden="true" />
-      <div className="login-layout">
-        <section className="login-panel login-panel--brand">
-          <div className="login-badge">Sistema POS</div>
-          <h1 className="login-title">{companyName}</h1>
-          <p className="login-description">
-            Accede a tu panel de ventas, inventario y caja desde una pantalla mas limpia y enfocada.
-          </p>
-          <div className="login-highlights">
-            <div className="login-highlight">
-              <span className="login-highlight-value">{config?.currency ?? 'USD'}</span>
-              <span className="login-highlight-label">Moneda base</span>
-            </div>
-            <div className="login-highlight">
-              <span className="login-highlight-value">Seguro</span>
-              <span className="login-highlight-label">Acceso privado</span>
-            </div>
-          </div>
-        </section>
-
+      <div className="login-layout login-layout--split">
         <section className="login-panel login-panel--form">
-          <div className="login-card-modern">
-            <div className="login-card-header">
-              {config?.logoUrl && (
-                <div className="login-logo-wrap">
-                  <img src={config.logoUrl} alt="logo" className="login-logo" />
+          <div className="login-form-panel">
+            <div className="login-form-header">
+              {config?.logoUrl ? (
+                <img src={config.logoUrl} alt="logo" className="login-logo-small" />
+              ) : (
+                <div className="login-logo-small login-logo-small--fallback" aria-hidden="true">
+                  {companyName.slice(0, 2).toUpperCase()}
                 </div>
               )}
-              <div className="login-copy">
-                <p className="login-eyebrow">Bienvenido</p>
-                <h3 className="login-card-title">Iniciar sesión</h3>
+
+              <div className="login-form-header-copy">
+                <div className="login-company">{companyName}</div>
+                <div className="login-subtitle">Inicia sesión</div>
               </div>
             </div>
-            <div className="login-copy login-copy--supporting">
-              <p>Ingresa tus credenciales para continuar.</p>
-            </div>
 
-            <form className="login-form" onSubmit={onSubmit}>
+            <form className="login-form login-form--flat" onSubmit={onSubmit}>
               <div className="login-field">
                 <label htmlFor="email">Correo</label>
                 <input
@@ -78,7 +60,7 @@ export default function Login() {
                   autoComplete="username"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  placeholder="tucorreo@dominio.com"
+                  placeholder="Correo"
                 />
               </div>
 
@@ -90,7 +72,7 @@ export default function Login() {
                   autoComplete="current-password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder="Escribe tu contraseña"
+                  placeholder="Contraseña"
                 />
               </div>
 
@@ -100,6 +82,19 @@ export default function Login() {
                 {isSubmitting ? 'Ingresando...' : 'Entrar'}
               </button>
             </form>
+          </div>
+        </section>
+        <section className="login-panel login-panel--brand">
+          <div
+            className="login-brand-card"
+            aria-hidden="true"
+            style={config?.logoUrl ? { backgroundImage: `url(${config.logoUrl})` } : undefined}
+          >
+            {!config?.logoUrl && (
+              <div className="login-brand-fallback">
+                {companyName.slice(0, 2).toUpperCase()}
+              </div>
+            )}
           </div>
         </section>
       </div>

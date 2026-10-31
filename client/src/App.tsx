@@ -36,6 +36,7 @@ import CashRegister from './pages/CashRegister'
 import CashHistory from './pages/CashHistory'
 import ShipmentsAdmin from './pages/ShipmentsAdmin'
 import MyShipments from './pages/MyShipments'
+import NoAccess from './pages/NoAccess'
 import { formatCompanyName } from './utils/text'
 import AlertHost from './components/AlertHost'
 import { useAuthStore } from './store/auth'
@@ -53,7 +54,7 @@ function RootLanding() {
   if (hasPermission('cash:view') || hasPermission('cash:open') || hasPermission('cash:movements') || hasPermission('cash:close')) {
     return <Navigate to="/cash-register" replace />
   }
-  return <Navigate to="/products" replace />
+  return <Navigate to="/no-access" replace />
 }
 
 function ThemeFab() {
@@ -215,6 +216,7 @@ export default function App() {
         />
         <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
           <Route index element={<RootLanding />} />
+          <Route path="no-access" element={<NoAccess />} />
           <Route path="dashboard" element={<RoleGuard roles={['ADMIN']}><Dashboard /></RoleGuard>} />
           <Route path="products" element={<PermissionGuard permission="products:read"><Products /></PermissionGuard>} />
           <Route path="categories" element={<PermissionGuard permission="categories:read"><Categories /></PermissionGuard>} />

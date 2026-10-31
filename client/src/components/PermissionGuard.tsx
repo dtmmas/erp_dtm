@@ -8,7 +8,7 @@ export default function PermissionGuard({ permission, children }: { permission: 
   const allowed = !!user && required.some(p => hasPermission(p))
 
   if (!user) return <Navigate to="/login" />
-  if (!allowed) return <Navigate to="/" />
+  if (!allowed) return <Navigate to="/no-access" replace />
   
   return children
 }
