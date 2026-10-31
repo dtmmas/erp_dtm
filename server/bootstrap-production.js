@@ -38,8 +38,8 @@ const permissionCatalog = [
   ['sales:read', 'Ver historial de ventas'],
   ['sales:create', 'Realizar ventas'],
   ['sales:cancel', 'Anular ventas'],
-  ['credits:read', 'Ver creditos'],
-  ['credits:write', 'Administrar creditos'],
+  ['credits:read', 'Reporte de creditos'],
+  ['credits:write', 'Gestion de creditos'],
   ['config:read', 'Ver configuracion'],
   ['config:write', 'Editar configuracion'],
   ['reports:read', 'Ver reportes'],
@@ -85,6 +85,19 @@ const roleDefinitions = [
       'cash:close',
       'cash:movements',
       'cash:view',
+    ],
+  },
+  {
+    code: 'VENDEDOR',
+    name: 'Vendedor',
+    description: 'Vendedor con acceso a POS sin operaciones de caja',
+    permissions: [
+      'pos:access',
+      'sales:create',
+      'sales:read',
+      'customers:read',
+      'customers:write',
+      'products:read',
     ],
   },
   {
@@ -354,9 +367,103 @@ async function normalizeSchema(conn) {
   await ensureColumn(conn, 'purchases', 'status', `VARCHAR(20) NOT NULL DEFAULT 'COMPLETED'`)
   await ensureColumn(conn, 'purchases', 'warehouse_id', 'INT NULL')
   await ensureColumn(conn, 'purchases', 'document_path', 'VARCHAR(255) NULL')
+  await ensureColumn(conn, 'purchases', 'payment_type', `VARCHAR(20) NOT NULL DEFAULT 'CASH'`)
+  await ensureColumn(conn, 'purchases', 'payment_status', `VARCHAR(20) NOT NULL DEFAULT 'PAID'`)
+  await ensureColumn(conn, 'purchases', 'payment_method', `VARCHAR(20) NOT NULL DEFAULT 'CASH'`)
+  await ensureColumn(conn, 'purchases', 'paid_amount', 'DECIMAL(12,2) NOT NULL DEFAULT 0')
+  await ensureColumn(conn, 'purchases', 'balance_due', 'DECIMAL(12,2) NOT NULL DEFAULT 0')
+  await ensureColumn(conn, 'purchases', 'due_date', 'DATE NULL')
+  await ensureColumn(conn, 'purchases', 'paid_at', 'DATETIME NULL')
   await ensureColumn(conn, 'purchase_items', 'total', 'DECIMAL(12,2) NOT NULL DEFAULT 0')
   await ensureColumn(conn, 'purchase_items', 'total_cost', 'DECIMAL(12,2) NOT NULL DEFAULT 0')
   await ensureColumn(conn, 'purchase_items', 'serials', 'TEXT NULL')
+  await conn.query(`
+    UPDATE purchases
+    SET payment_type = COALESCE(NULLIF(payment_type, ''), 'CASH'),
+        payment_status = COALESCE(NULLIF(payment_status, ''), 'PAID'),
+        payment_method = COALESCE(NULLIF(payment_method, ''), 'CASH'),
+        paid_amount = CASE
+          WHEN paid_amount IS NULL OR paid_amount = 0 THEN COALESCE(total, 0)
+          ELSE paid_amount
+        END,
+        balance_due = CASE
+          WHEN balance_due IS NULL THEN 0
+          WHEN payment_status = 'PAID' THEN 0
+          ELSE balance_due
+        END
+  `)
+  await conn.query(`
+    UPDATE purchases
+    SET balance_due = GREATEST(ROUND(COALESCE(total, 0) - COALESCE(paid_amount, 0), 2), 0),
+        payment_status = CASE
+          WHEN ROUND(GREATEST(COALESCE(total, 0) - COALESCE(paid_amount, 0), 0), 2) = 0 THEN 'PAID'
+          WHEN COALESCE(paid_amount, 0) > 0 THEN 'PARTIAL'
+          ELSE 'PENDING'
+        END
+  `)
+
+  await conn.query(`
+    CREATE TABLE IF NOT EXISTS purchase_payments (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      purchase_id INT NOT NULL,
+      amount DECIMAL(12,2) NOT NULL,
+      payment_method VARCHAR(20) NOT NULL DEFAULT 'CASH',
+      reference VARCHAR(160) NULL,
+      notes TEXT NULL,
+      document_path VARCHAR(255) NULL,
+      paid_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      user_id INT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT fk_purchase_payments_purchase FOREIGN KEY (purchase_id) REFERENCES purchases(id) ON DELETE CASCADE
+    )
+  `)
+  await ensureColumn(conn, 'purchase_payments', 'reference', 'VARCHAR(160) NULL')
+  await ensureColumn(conn, 'purchase_payments', 'notes', 'TEXT NULL')
+  await ensureColumn(conn, 'purchase_payments', 'document_path', 'VARCHAR(255) NULL')
+  await ensureColumn(conn, 'purchase_payments', 'user_id', 'INT NULL')
+  await ensureIndex(conn, 'purchase_payments', 'idx_purchase_payments_purchase', 'purchase_id')
+  await ensureIndex(conn, 'purchase_payments', 'idx_purchase_payments_paid_at', 'paid_at')
+  await ensureForeignKey(conn, 'purchase_payments', 'user_id', 'users', 'fk_purchase_payments_user', 'SET NULL')
+
+  await conn.query(`
+    CREATE TABLE IF NOT EXISTS supplier_payments (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      supplier_id INT NOT NULL,
+      amount DECIMAL(12,2) NOT NULL,
+      payment_method VARCHAR(20) NOT NULL DEFAULT 'CASH',
+      reference VARCHAR(160) NULL,
+      notes TEXT NULL,
+      document_path VARCHAR(255) NULL,
+      paid_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      user_id INT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT fk_supplier_payments_supplier FOREIGN KEY (supplier_id) REFERENCES suppliers(id) ON DELETE CASCADE
+    )
+  `)
+  await ensureColumn(conn, 'supplier_payments', 'reference', 'VARCHAR(160) NULL')
+  await ensureColumn(conn, 'supplier_payments', 'notes', 'TEXT NULL')
+  await ensureColumn(conn, 'supplier_payments', 'document_path', 'VARCHAR(255) NULL')
+  await ensureColumn(conn, 'supplier_payments', 'user_id', 'INT NULL')
+  await ensureIndex(conn, 'supplier_payments', 'idx_supplier_payments_supplier', 'supplier_id')
+  await ensureIndex(conn, 'supplier_payments', 'idx_supplier_payments_paid_at', 'paid_at')
+  await ensureForeignKey(conn, 'supplier_payments', 'user_id', 'users', 'fk_supplier_payments_user', 'SET NULL')
+
+  await conn.query(`
+    CREATE TABLE IF NOT EXISTS supplier_payment_allocations (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      supplier_payment_id INT NOT NULL,
+      purchase_id INT NOT NULL,
+      purchase_payment_id INT NULL,
+      amount DECIMAL(12,2) NOT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT fk_supplier_payment_allocations_payment FOREIGN KEY (supplier_payment_id) REFERENCES supplier_payments(id) ON DELETE CASCADE,
+      CONSTRAINT fk_supplier_payment_allocations_purchase FOREIGN KEY (purchase_id) REFERENCES purchases(id) ON DELETE CASCADE
+    )
+  `)
+  await ensureColumn(conn, 'supplier_payment_allocations', 'purchase_payment_id', 'INT NULL')
+  await ensureIndex(conn, 'supplier_payment_allocations', 'idx_supplier_payment_allocations_payment', 'supplier_payment_id')
+  await ensureIndex(conn, 'supplier_payment_allocations', 'idx_supplier_payment_allocations_purchase', 'purchase_id')
+  await ensureForeignKey(conn, 'supplier_payment_allocations', 'purchase_payment_id', 'purchase_payments', 'fk_supplier_payment_allocations_purchase_payment', 'SET NULL')
 
   if (await columnExists(conn, 'purchase_items', 'total')) {
     await conn.query(`
@@ -529,7 +636,7 @@ async function seedSecurity(conn) {
     )
   }
 
-  const [roleRows] = await conn.query(`SELECT id, code FROM roles WHERE code IN ('ADMIN','CAJERO','ALMACEN')`)
+  const [roleRows] = await conn.query(`SELECT id, code FROM roles WHERE code IN ('ADMIN','CAJERO','VENDEDOR','ALMACEN')`)
   const roleIds = Object.fromEntries(roleRows.map(row => [row.code, row.id]))
 
   const [permissionRows] = await conn.query('SELECT id, code FROM permissions')

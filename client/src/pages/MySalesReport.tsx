@@ -93,6 +93,7 @@ function getDateRangeLabel(startDate: string, endDate: string) {
 }
 
 function getPaymentMethodLabel(method?: string, isCredit?: number) {
+  if (method === 'PENDING') return 'Por cobrar en caja'
   if (method === 'CASH') return 'Efectivo'
   if (method === 'CARD') return 'Tarjeta'
   if (method === 'DEPOSIT') return 'Depósito'
@@ -123,6 +124,7 @@ function isCreditSale(sale?: Pick<Sale, 'payment_method' | 'is_credit'> | null) 
 
 function getSaleStatusLabel(sale: Pick<Sale, 'status' | 'payment_method' | 'is_credit' | 'credit_fully_paid'>, filter: PaymentFilter) {
   if (sale.status === 'CANCELLED') return 'CANCELADO'
+  if (sale.status === 'PENDING_PAYMENT') return 'POR COBRAR'
   if (filter === 'CREDIT_PAID') return 'LIQUIDADO'
   if (filter === 'REALIZED' && isCreditSale(sale)) return 'LIQUIDADO'
   if (isCreditSale(sale) && !sale.credit_fully_paid) return 'PENDIENTE'

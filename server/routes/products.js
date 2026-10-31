@@ -1,12 +1,86 @@
 import express from 'express'
+import fs from 'fs'
 import multer from 'multer'
+import path from 'path'
 import { authMiddleware, canAccessWarehouse, getUserWarehouseId, isAdminUser, roleMiddleware } from '../auth.js'
 import { getPool } from '../db.js'
 import { registerMovement } from '../services/inventory.js'
-import { uploadsDir } from '../paths.js'
+import { projectRoot, uploadsDir } from '../paths.js'
+
+// #region debug-point product-image-500-config
+let __dbgUrl = null
+try {
+  const raw = fs.readFileSync(path.join(projectRoot, '.dbg', 'product-image-500.env'), 'utf-8')
+  for (const line of raw.split('\n')) {
+    const [k, ...rest] = line.trim().split('=')
+    if (!k) continue
+    const v = rest.join('=').trim()
+    if (k === 'DEBUG_SERVER_URL') __dbgUrl = v
+  }
+} catch {}
+
+async function __dbgReport(event) {
+  if (!__dbgUrl) return
+  try {
+    await fetch(__dbgUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        sessionId: 'product-image-500',
+        at: new Date().toISOString(),
+        ...event,
+      }),
+    })
+  } catch {}
+}
+// #endregion debug-point product-image-500-config
 
 const router = express.Router()
 const upload = multer({ dest: uploadsDir })
+const uploadProductImages = upload.fields([
+  { name: 'image', maxCount: 1 },
+  { name: 'images', maxCount: 12 },
+])
+
+function collectUploadedProductImages(req) {
+  const map = req.files && typeof req.files === 'object' ? req.files : {}
+  const legacy = Array.isArray(map.image) ? map.image : []
+  const many = Array.isArray(map.images) ? map.images : []
+  const all = [...legacy, ...many].filter(Boolean)
+  const seen = new Set()
+  const unique = []
+  for (const file of all) {
+    const key = file?.filename ? String(file.filename) : ''
+    if (!key) continue
+    if (seen.has(key)) continue
+    seen.add(key)
+    unique.push(file)
+  }
+  return unique
+}
+
+async function readProductImages(conn, productId) {
+  const [rows] = await conn.query(
+    'SELECT id, image_url, sort_order FROM product_images WHERE product_id = ? ORDER BY sort_order ASC, id ASC',
+    [productId]
+  )
+  const imageItems = (rows || [])
+    .map(row => ({
+      id: Number(row.id || 0),
+      imageUrl: row.image_url ? String(row.image_url) : '',
+      sortOrder: Number(row.sort_order || 0),
+    }))
+    .filter(item => item.id > 0 && item.imageUrl)
+  const images = imageItems.map(item => item.imageUrl)
+  return { imageItems, images }
+}
+
+async function refreshProductPrimaryImage(conn, productId) {
+  const { images } = await readProductImages(conn, productId)
+  const primary = images[0] ?? null
+  await conn.query('UPDATE products SET image_url = ? WHERE id = ?', [primary, productId])
+  return primary
+}
 
 // Ensure warehouse stock table and default warehouse id=1
 async function ensureWarehouseStockTable(pool) {
@@ -386,6 +460,35 @@ router.get('/', authMiddleware, async (req, res) => {
       shelfLocation: r.shelf_location || undefined,
     }, includeSensitive))
 
+    const productIds = items.map(item => Number(item?.id || 0)).filter(id => id > 0)
+    if (productIds.length > 0) {
+      const placeholders = productIds.map(() => '?').join(',')
+      const [imageRows] = await pool.query(
+        `SELECT product_id, image_url
+         FROM product_images
+         WHERE product_id IN (${placeholders})
+         ORDER BY sort_order ASC, id ASC`,
+        productIds
+      )
+      const map = new Map()
+      for (const row of imageRows || []) {
+        const pid = Number(row.product_id || 0)
+        const url = row.image_url ? String(row.image_url) : ''
+        if (!pid || !url) continue
+        const arr = map.get(pid) || []
+        arr.push(url)
+        map.set(pid, arr)
+      }
+      for (const item of items) {
+        const pid = Number(item?.id || 0)
+        const images = map.get(pid) || []
+        item.images = images
+        if (!item.imageUrl && images.length > 0) {
+          item.imageUrl = images[0]
+        }
+      }
+    }
+
     if (isPaged) {
       return res.json({
         data: items,
@@ -609,6 +712,19 @@ router.get('/:id', authMiddleware, async (req, res) => {
       serials = serialDetails.map(item => item.serial)
     }
 
+    const [productImageRows] = await pool.query(
+      'SELECT id, image_url, sort_order FROM product_images WHERE product_id = ? ORDER BY sort_order ASC, id ASC',
+      [id]
+    )
+    const imageItems = (productImageRows || [])
+      .map(row => ({
+        id: Number(row.id || 0),
+        imageUrl: row.image_url ? String(row.image_url) : '',
+        sortOrder: Number(row.sort_order || 0),
+      }))
+      .filter(item => item.id > 0 && item.imageUrl)
+    const images = imageItems.map(item => item.imageUrl)
+
     return res.json(sanitizeSensitiveProductFields({
       id: r.id,
       name: r.name,
@@ -629,7 +745,9 @@ router.get('/:id', authMiddleware, async (req, res) => {
       minStock: Number(r.min_stock ?? 0),
       unit: r.unit || undefined,
       description: r.description || undefined,
-      imageUrl: r.image_url || undefined,
+      imageUrl: r.image_url || images[0] || undefined,
+      images,
+      imageItems,
       productType: type,
       altName: r.alt_name || undefined,
       genericName: r.generic_name || undefined,
@@ -768,10 +886,11 @@ router.post('/:id/warehouse-stock/transfer', authMiddleware, roleMiddleware(['AD
   }
 })
 
-router.post('/', authMiddleware, upload.single('image'), async (req, res) => {
+router.post('/', authMiddleware, uploadProductImages, async (req, res) => {
   try {
     const { name, sku, productCode, categoryId, brandId, supplierId, price, price2, price3, cost, stock, initialStock, minStock, unit, description, productType, altName, genericName, shelfLocation } = req.body
-    const imageUrl = req.file ? `/uploads/${req.file.filename}` : null
+    const imageUrls = collectUploadedProductImages(req).map(file => `/uploads/${file.filename}`)
+    const imageUrl = imageUrls[0] ?? null
     const pool = await getPool()
     if (!await canWriteProducts(req, pool)) {
       return res.status(403).json({ error: 'No tienes permisos para crear productos' })
@@ -860,6 +979,13 @@ router.post('/', authMiddleware, upload.single('image'), async (req, res) => {
       )
       const id = result.insertId
 
+      if (imageUrls.length > 0) {
+        await conn.query(
+          'INSERT INTO product_images (product_id, image_url, sort_order) VALUES ?',
+          [imageUrls.map((url, idx) => [id, url, idx])]
+        )
+      }
+
 
       if (type === 'MEDICINAL' && batches.length) {
         await Promise.all(
@@ -917,6 +1043,7 @@ router.post('/', authMiddleware, upload.single('image'), async (req, res) => {
         unit: unit || undefined,
         description: description || undefined,
         imageUrl: imageUrl || undefined,
+        images: imageUrls,
         productType: type,
         altName: altName || undefined,
         genericName: genericName || undefined,
@@ -953,16 +1080,30 @@ router.post('/', authMiddleware, upload.single('image'), async (req, res) => {
   }
 })
 
-router.put('/:id', authMiddleware, upload.single('image'), async (req, res) => {
+router.put('/:id', authMiddleware, uploadProductImages, async (req, res) => {
   try {
     const id = Number(req.params.id)
     const { name, sku, productCode, categoryId, brandId, supplierId, price, price2, price3, cost, stock, initialStock, minStock, unit, description, productType, altName, genericName, shelfLocation } = req.body
     const pool = await getPool()
+// #region debug-point product-image-500-products-put
+    void __dbgReport({
+      hypothesisId: 'H2',
+      point: 'products.put.start',
+      route: 'PUT /api/products/:id',
+      productId: id,
+      hasFileKeys: req.files && typeof req.files === 'object' ? Object.keys(req.files) : [],
+      fileCounts: req.files && typeof req.files === 'object'
+        ? Object.fromEntries(Object.entries(req.files).map(([k, v]) => [k, Array.isArray(v) ? v.length : 0]))
+        : {},
+      bodyKeys: req.body && typeof req.body === 'object' ? Object.keys(req.body) : [],
+    })
+// #endregion debug-point product-image-500-products-put
     if (!await canWriteProducts(req, pool)) {
       return res.status(403).json({ error: 'No tienes permisos para editar productos' })
     }
     let nextImage = null
-    if (req.file) nextImage = `/uploads/${req.file.filename}`
+    const newImageUrls = collectUploadedProductImages(req).map(file => `/uploads/${file.filename}`)
+    if (newImageUrls.length > 0) nextImage = newImageUrls[0]
     else {
       const [rows] = await pool.query('SELECT image_url FROM products WHERE id = ? LIMIT 1', [id])
       nextImage = rows?.[0]?.image_url ?? null
@@ -1127,6 +1268,18 @@ router.put('/:id', authMiddleware, upload.single('image'), async (req, res) => {
         await Promise.all(serials.map(serial => conn.query('INSERT INTO product_serials (product_id, serial_no) VALUES (?, ?)', [id, String(serial || '')])))
       }
 
+      if (newImageUrls.length > 0) {
+        const [[orderRow]] = await conn.query(
+          'SELECT COALESCE(MAX(sort_order), -1) AS max_order FROM product_images WHERE product_id = ?',
+          [id]
+        )
+        const start = Number(orderRow?.max_order ?? -1) + 1
+        await conn.query(
+          'INSERT INTO product_images (product_id, image_url, sort_order) VALUES ?',
+          [newImageUrls.map((url, idx) => [id, url, start + idx])]
+        )
+      }
+
       // Confirmar transacción
       await conn.commit()
 
@@ -1144,6 +1297,9 @@ router.put('/:id', authMiddleware, upload.single('image'), async (req, res) => {
       )
       const r = rows2?.[0]
       if (!r) return res.status(404).json({ error: 'Not found' })
+
+      const { images, imageItems } = await readProductImages(conn, id)
+
       return res.json({
         id: r.id,
         name: r.name,
@@ -1163,7 +1319,9 @@ router.put('/:id', authMiddleware, upload.single('image'), async (req, res) => {
         minStock: Number(r.min_stock ?? 0),
         unit: r.unit || undefined,
         description: r.description || undefined,
-        imageUrl: r.image_url || undefined,
+        imageUrl: r.image_url || images[0] || undefined,
+        images,
+        imageItems,
         productType: r.product_type || undefined,
         altName: r.alt_name || undefined,
         genericName: r.generic_name || undefined,
@@ -1178,6 +1336,18 @@ router.put('/:id', authMiddleware, upload.single('image'), async (req, res) => {
     }
   } catch (err) {
     console.error('Products PUT error:', err)
+// #region debug-point product-image-500-products-put-error
+    void __dbgReport({
+      hypothesisId: 'H1',
+      point: 'products.put.error',
+      route: 'PUT /api/products/:id',
+      productId: Number(req.params.id || 0),
+      errCode: err?.code,
+      errMessage: err?.message,
+      sqlMessage: err?.sqlMessage,
+      stack: err?.stack,
+    })
+// #endregion debug-point product-image-500-products-put-error
     const isDup = err?.code === 'ER_DUP_ENTRY'
     if (isDup) {
       const m = String(err?.sqlMessage || err?.message || '')
@@ -1197,6 +1367,206 @@ router.put('/:id', authMiddleware, upload.single('image'), async (req, res) => {
       }
       return res.status(409).json({ error: 'Registro duplicado', duplicate })
     }
+    return res.status(500).json({ error: 'Server error' })
+  }
+})
+
+router.post('/:id/images', authMiddleware, upload.array('images', 12), async (req, res) => {
+  try {
+    const productId = Number(req.params.id)
+    if (!productId || Number.isNaN(productId)) {
+      return res.status(400).json({ error: 'ID de producto inválido' })
+    }
+    const files = Array.isArray(req.files) ? req.files : []
+    const imageUrls = files.map(file => `/uploads/${file.filename}`).filter(Boolean)
+    if (imageUrls.length === 0) {
+      return res.status(400).json({ error: 'No se recibieron imágenes' })
+    }
+    const pool = await getPool()
+    if (!await canWriteProducts(req, pool)) {
+      return res.status(403).json({ error: 'No tienes permisos para editar productos' })
+    }
+    const conn = await pool.getConnection()
+    try {
+      await conn.beginTransaction()
+      const [[orderRow]] = await conn.query(
+        'SELECT COALESCE(MAX(sort_order), -1) AS max_order FROM product_images WHERE product_id = ?',
+        [productId]
+      )
+      const start = Number(orderRow?.max_order ?? -1) + 1
+      await conn.query(
+        'INSERT INTO product_images (product_id, image_url, sort_order) VALUES ?',
+        [imageUrls.map((url, idx) => [productId, url, start + idx])]
+      )
+      const imageUrl = await refreshProductPrimaryImage(conn, productId)
+      const { images, imageItems } = await readProductImages(conn, productId)
+      await conn.commit()
+      return res.json({ ok: true, imageUrl: imageUrl || undefined, images, imageItems })
+    } catch (txErr) {
+      await conn.rollback()
+      throw txErr
+    } finally {
+      conn.release()
+    }
+  } catch (err) {
+    console.error('Products POST images error:', err)
+    return res.status(500).json({ error: 'Server error' })
+  }
+})
+
+router.put('/:id/images/:imageId', authMiddleware, upload.single('image'), async (req, res) => {
+  try {
+    const productId = Number(req.params.id)
+    const imageId = Number(req.params.imageId)
+// #region debug-point product-image-500-image-replace
+    void __dbgReport({
+      hypothesisId: 'H2',
+      point: 'products.images.replace.start',
+      route: 'PUT /api/products/:id/images/:imageId',
+      productId,
+      imageId,
+      hasFile: Boolean(req.file),
+      file: req.file ? { fieldname: req.file.fieldname, originalname: req.file.originalname, filename: req.file.filename, size: req.file.size, mimetype: req.file.mimetype } : null,
+    })
+// #endregion debug-point product-image-500-image-replace
+    if (!productId || Number.isNaN(productId) || !imageId || Number.isNaN(imageId)) {
+      return res.status(400).json({ error: 'IDs inválidos' })
+    }
+    if (!req.file) {
+      return res.status(400).json({ error: 'No se recibió imagen' })
+    }
+    const nextUrl = `/uploads/${req.file.filename}`
+    const pool = await getPool()
+    if (!await canWriteProducts(req, pool)) {
+      return res.status(403).json({ error: 'No tienes permisos para editar productos' })
+    }
+    const conn = await pool.getConnection()
+    try {
+      await conn.beginTransaction()
+      const [rows] = await conn.query(
+        'SELECT id FROM product_images WHERE id = ? AND product_id = ? LIMIT 1',
+        [imageId, productId]
+      )
+      if (!Array.isArray(rows) || rows.length === 0) {
+        await conn.rollback()
+        return res.status(404).json({ error: 'Imagen no encontrada' })
+      }
+      await conn.query('UPDATE product_images SET image_url = ? WHERE id = ? AND product_id = ?', [nextUrl, imageId, productId])
+      const imageUrl = await refreshProductPrimaryImage(conn, productId)
+      const { images, imageItems } = await readProductImages(conn, productId)
+      await conn.commit()
+      return res.json({ ok: true, imageUrl: imageUrl || undefined, images, imageItems })
+    } catch (txErr) {
+      await conn.rollback()
+      throw txErr
+    } finally {
+      conn.release()
+    }
+  } catch (err) {
+    console.error('Products PUT image replace error:', err)
+// #region debug-point product-image-500-image-replace-error
+    void __dbgReport({
+      hypothesisId: 'H3',
+      point: 'products.images.replace.error',
+      route: 'PUT /api/products/:id/images/:imageId',
+      productId: Number(req.params.id || 0),
+      imageId: Number(req.params.imageId || 0),
+      errCode: err?.code,
+      errMessage: err?.message,
+      sqlMessage: err?.sqlMessage,
+      stack: err?.stack,
+    })
+// #endregion debug-point product-image-500-image-replace-error
+    return res.status(500).json({ error: 'Server error' })
+  }
+})
+
+router.delete('/:id/images/:imageId', authMiddleware, async (req, res) => {
+  try {
+    const productId = Number(req.params.id)
+    const imageId = Number(req.params.imageId)
+    if (!productId || Number.isNaN(productId) || !imageId || Number.isNaN(imageId)) {
+      return res.status(400).json({ error: 'IDs inválidos' })
+    }
+    const pool = await getPool()
+    if (!await canWriteProducts(req, pool)) {
+      return res.status(403).json({ error: 'No tienes permisos para editar productos' })
+    }
+    const conn = await pool.getConnection()
+    try {
+      await conn.beginTransaction()
+      const [rows] = await conn.query(
+        'SELECT id FROM product_images WHERE id = ? AND product_id = ? LIMIT 1',
+        [imageId, productId]
+      )
+      if (!Array.isArray(rows) || rows.length === 0) {
+        await conn.rollback()
+        return res.status(404).json({ error: 'Imagen no encontrada' })
+      }
+      await conn.query('DELETE FROM product_images WHERE id = ? AND product_id = ?', [imageId, productId])
+      const imageUrl = await refreshProductPrimaryImage(conn, productId)
+      const { images, imageItems } = await readProductImages(conn, productId)
+      await conn.commit()
+      return res.json({ ok: true, imageUrl: imageUrl || undefined, images, imageItems })
+    } catch (txErr) {
+      await conn.rollback()
+      throw txErr
+    } finally {
+      conn.release()
+    }
+  } catch (err) {
+    console.error('Products DELETE image error:', err)
+    return res.status(500).json({ error: 'Server error' })
+  }
+})
+
+router.put('/:id/images/reorder', authMiddleware, async (req, res) => {
+  try {
+    const productId = Number(req.params.id)
+    if (!productId || Number.isNaN(productId)) {
+      return res.status(400).json({ error: 'ID de producto inválido' })
+    }
+    const rawOrderIds = Array.isArray(req.body?.orderIds) ? req.body.orderIds : []
+    const orderIds = rawOrderIds
+      .map(x => Number(x))
+      .filter(x => x > 0 && !Number.isNaN(x))
+    const uniqueOrderIds = [...new Set(orderIds)]
+
+    const pool = await getPool()
+    if (!await canWriteProducts(req, pool)) {
+      return res.status(403).json({ error: 'No tienes permisos para editar productos' })
+    }
+
+    const conn = await pool.getConnection()
+    try {
+      await conn.beginTransaction()
+      const { imageItems } = await readProductImages(conn, productId)
+      const existingIds = imageItems.map(item => item.id)
+      if (existingIds.length === 0) {
+        await conn.rollback()
+        return res.status(404).json({ error: 'No hay imágenes para reordenar' })
+      }
+      const existingSet = new Set(existingIds)
+      const filtered = uniqueOrderIds.filter(id => existingSet.has(id))
+      const remaining = existingIds.filter(id => !new Set(filtered).has(id))
+      const finalOrder = [...filtered, ...remaining]
+
+      await Promise.all(finalOrder.map((id, idx) =>
+        conn.query('UPDATE product_images SET sort_order = ? WHERE id = ? AND product_id = ?', [idx, id, productId])
+      ))
+
+      const imageUrl = await refreshProductPrimaryImage(conn, productId)
+      const { images, imageItems: nextItems } = await readProductImages(conn, productId)
+      await conn.commit()
+      return res.json({ ok: true, imageUrl: imageUrl || undefined, images, imageItems: nextItems })
+    } catch (txErr) {
+      await conn.rollback()
+      throw txErr
+    } finally {
+      conn.release()
+    }
+  } catch (err) {
+    console.error('Products PUT images reorder error:', err)
     return res.status(500).json({ error: 'Server error' })
   }
 })

@@ -51,6 +51,7 @@ async function updateRolesV2() {
     const map = {
         'ADMIN': 'Administrador',
         'CAJERO': 'Cajero',
+        'VENDEDOR': 'Vendedor',
         'ALMACEN': 'Almacén'
     }
     if (map[roleCode]) {
@@ -99,6 +100,18 @@ async function updateRolesV2() {
 
   // 2. Reorganize Roles
 
+  try {
+    await conn.query(
+      'INSERT IGNORE INTO roles (code, name, description) VALUES (?, ?, ?)',
+      ['VENDEDOR', 'Vendedor', 'Vendedor con acceso a POS sin operaciones de caja']
+    )
+  } catch (e) {
+    await conn.query(
+      'INSERT IGNORE INTO roles (name, description) VALUES (?, ?)',
+      ['Vendedor', 'Vendedor con acceso a POS sin operaciones de caja']
+    )
+  }
+
   // ADMIN: All permissions
   await assignPerms('ADMIN', 'ALL')
 
@@ -114,7 +127,21 @@ async function updateRolesV2() {
     'customers:write', // Can create new customers at POS
     'products:read', 
     'credits:read', 
-    'credits:write' // Manage credit payments
+    'credits:write', // Manage credit payments
+    'cash:open',
+    'cash:close',
+    'cash:movements',
+    'cash:view'
+  ])
+
+  // VENDEDOR: POS y registro de ventas sin caja
+  await assignPerms('VENDEDOR', [
+    'pos:access',
+    'sales:create',
+    'sales:read',
+    'customers:read',
+    'customers:write',
+    'products:read'
   ])
 
   // ALMACEN: Focused on Inventory, Purchases, Catalog

@@ -1,5 +1,5 @@
 import express from 'express'
-import { authMiddleware, canUserSell } from '../auth.js'
+import { authMiddleware, hasUserPermission, isAdminUser } from '../auth.js'
 import { getPool } from '../db.js'
 
 const router = express.Router()
@@ -26,6 +26,14 @@ function resolveTargetUserId(req) {
   return req.user.id
 }
 
+function canAccessCashModule(user) {
+  return isAdminUser(user)
+    || hasUserPermission(user, 'cash:view')
+    || hasUserPermission(user, 'cash:open')
+    || hasUserPermission(user, 'cash:movements')
+    || hasUserPermission(user, 'cash:close')
+}
+
 async function columnExists(pool, table, column) {
   const cacheKey = `${table}.${column}`
   if (schemaCache.has(cacheKey)) return schemaCache.get(cacheKey)
@@ -42,6 +50,18 @@ async function columnExists(pool, table, column) {
   const exists = Number(rows?.[0]?.c || 0) > 0
   schemaCache.set(cacheKey, exists)
   return exists
+}
+
+async function ensureSalesPaymentSchema(pool) {
+  if (!(await columnExists(pool, 'sales', 'status'))) {
+    await pool.query(`ALTER TABLE sales ADD COLUMN status VARCHAR(20) DEFAULT 'COMPLETED'`)
+  }
+  if (!(await columnExists(pool, 'sales', 'paid_by_user_id'))) {
+    await pool.query('ALTER TABLE sales ADD COLUMN paid_by_user_id INT NULL')
+  }
+  if (!(await columnExists(pool, 'sales', 'paid_at'))) {
+    await pool.query('ALTER TABLE sales ADD COLUMN paid_at DATETIME NULL')
+  }
 }
 
 async function getCreditPaymentsByMethod(pool, { shiftId, userId, startAt, endAt = null }) {
@@ -182,6 +202,7 @@ async function getClosedShifts(pool, { start, end, limit }) {
 }
 
 async function getClosedShiftDetail(pool, shiftId) {
+  await ensureSalesPaymentSchema(pool)
   const [rows] = await pool.query(
     `
       SELECT
@@ -212,13 +233,24 @@ async function getClosedShiftDetail(pool, shiftId) {
         payment_method,
         COALESCE(SUM(total), 0) AS total_sales
       FROM sales
-      WHERE created_at >= ?
-        AND created_at <= ?
-        AND COALESCE(status, 'COMPLETED') = 'COMPLETED'
-        AND user_id = ?
+      WHERE COALESCE(status, 'COMPLETED') = 'COMPLETED'
+        AND (
+          (
+            paid_by_user_id = ?
+            AND paid_at IS NOT NULL
+            AND paid_at >= ?
+            AND paid_at <= ?
+          )
+          OR (
+            paid_by_user_id IS NULL
+            AND user_id = ?
+            AND created_at >= ?
+            AND created_at <= ?
+          )
+        )
       GROUP BY payment_method
     `,
-    [shift.opened_at, shift.closed_at, shift.opened_by]
+    [shift.opened_by, shift.opened_at, shift.closed_at, shift.opened_by, shift.opened_at, shift.closed_at]
   )
 
   const [movements] = await pool.query(
@@ -308,6 +340,9 @@ async function getClosedShiftDetail(pool, shiftId) {
 // 1. Get Status (Is Open?)
 router.get('/status', authMiddleware, async (req, res) => {
   try {
+    if (!canAccessCashModule(req.user)) {
+      return res.status(403).json({ error: 'No tienes permisos para ver caja' })
+    }
     const pool = await getPool()
     const targetUserId = resolveTargetUserId(req)
     const shift = await getOpenShiftForUser(pool, targetUserId)
@@ -332,8 +367,8 @@ router.get('/status', authMiddleware, async (req, res) => {
 // 2. Open Register
 router.post('/open', authMiddleware, async (req, res) => {
   try {
-    if (!canUserSell(req.user)) {
-      return res.status(403).json({ error: 'Tu usuario no tiene habilitada la operacion de ventas/caja' })
+    if (!hasUserPermission(req.user, 'cash:open')) {
+      return res.status(403).json({ error: 'No tienes permisos para abrir caja' })
     }
 
     const { openingAmount, notes } = req.body
@@ -365,7 +400,11 @@ router.post('/open', authMiddleware, async (req, res) => {
 // 3. Get Summary (Calculated Totals)
 router.get('/summary', authMiddleware, async (req, res) => {
   try {
+    if (!canAccessCashModule(req.user)) {
+      return res.status(403).json({ error: 'No tienes permisos para ver caja' })
+    }
     const pool = await getPool()
+    await ensureSalesPaymentSchema(pool)
     const targetUserId = resolveTargetUserId(req)
     const shift = await getOpenShiftForUser(pool, targetUserId)
     
@@ -379,11 +418,21 @@ router.get('/summary', authMiddleware, async (req, res) => {
         SUM(total) as total_sales,
         SUM(CASE WHEN payment_method = 'CASH' THEN received_amount - change_amount ELSE 0 END) as cash_in_hand
       FROM sales 
-      WHERE created_at >= ? 
-        AND COALESCE(status, 'COMPLETED') = 'COMPLETED'
-        AND user_id = ?
+      WHERE COALESCE(status, 'COMPLETED') = 'COMPLETED'
+        AND (
+          (
+            paid_by_user_id = ?
+            AND paid_at IS NOT NULL
+            AND paid_at >= ?
+          )
+          OR (
+            paid_by_user_id IS NULL
+            AND user_id = ?
+            AND created_at >= ?
+          )
+        )
       GROUP BY payment_method
-    `, [shift.opened_at, targetUserId])
+    `, [targetUserId, shift.opened_at, targetUserId, shift.opened_at])
 
     const creditPaymentRows = await getCreditPaymentsByMethod(pool, {
       shiftId: shift.id,
@@ -459,8 +508,8 @@ router.get('/summary', authMiddleware, async (req, res) => {
 // 4. Add Movement
 router.post('/movements', authMiddleware, async (req, res) => {
   try {
-    if (!canUserSell(req.user)) {
-      return res.status(403).json({ error: 'Tu usuario no tiene habilitada la operacion de ventas/caja' })
+    if (!hasUserPermission(req.user, 'cash:movements')) {
+      return res.status(403).json({ error: 'No tienes permisos para registrar movimientos de caja' })
     }
 
     const { type, amount, description } = req.body
@@ -490,6 +539,9 @@ router.post('/movements', authMiddleware, async (req, res) => {
 // 5. Get Movements List
 router.get('/movements', authMiddleware, async (req, res) => {
   try {
+    if (!canAccessCashModule(req.user)) {
+      return res.status(403).json({ error: 'No tienes permisos para ver movimientos de caja' })
+    }
     const pool = await getPool()
     const targetUserId = resolveTargetUserId(req)
     const shift = await getOpenShiftForUser(pool, targetUserId)
@@ -513,8 +565,8 @@ router.get('/movements', authMiddleware, async (req, res) => {
 // 6. Close Register
 router.post('/close', authMiddleware, async (req, res) => {
   try {
-    if (!canUserSell(req.user)) {
-      return res.status(403).json({ error: 'Tu usuario no tiene habilitada la operacion de ventas/caja' })
+    if (!hasUserPermission(req.user, 'cash:close')) {
+      return res.status(403).json({ error: 'No tienes permisos para cerrar caja' })
     }
 
     const { closingAmount, notes } = req.body
@@ -525,6 +577,7 @@ router.post('/close', authMiddleware, async (req, res) => {
     }
 
     const pool = await getPool()
+    await ensureSalesPaymentSchema(pool)
     const shift = await getOpenShiftForUser(pool, req.user.id)
     
     if (!shift) {
@@ -534,11 +587,21 @@ router.post('/close', authMiddleware, async (req, res) => {
     const [salesStats] = await pool.query(`
       SELECT payment_method, SUM(total) as total_sales
       FROM sales 
-      WHERE created_at >= ?
-        AND COALESCE(status, 'COMPLETED') = 'COMPLETED'
-        AND user_id = ?
+      WHERE COALESCE(status, 'COMPLETED') = 'COMPLETED'
+        AND (
+          (
+            paid_by_user_id = ?
+            AND paid_at IS NOT NULL
+            AND paid_at >= ?
+          )
+          OR (
+            paid_by_user_id IS NULL
+            AND user_id = ?
+            AND created_at >= ?
+          )
+        )
       GROUP BY payment_method
-    `, [shift.opened_at, req.user.id])
+    `, [req.user.id, shift.opened_at, req.user.id, shift.opened_at])
 
     const creditPaymentRows = await getCreditPaymentsByMethod(pool, {
       shiftId: shift.id,
@@ -598,6 +661,9 @@ router.post('/close', authMiddleware, async (req, res) => {
 
 router.get('/history/shifts', authMiddleware, async (req, res) => {
   try {
+    if (!canAccessCashModule(req.user)) {
+      return res.status(403).json({ error: 'No tienes permisos para ver cierres de caja' })
+    }
     const pool = await getPool()
     const start = (req.query.start || '').toString().slice(0, 10)
     const end = (req.query.end || '').toString().slice(0, 10)
@@ -613,6 +679,9 @@ router.get('/history/shifts', authMiddleware, async (req, res) => {
 
 router.get('/history/shifts/:id', authMiddleware, async (req, res) => {
   try {
+    if (!canAccessCashModule(req.user)) {
+      return res.status(403).json({ error: 'No tienes permisos para ver cierres de caja' })
+    }
     const pool = await getPool()
     const shiftId = Number(req.params.id || 0)
     if (!shiftId) {

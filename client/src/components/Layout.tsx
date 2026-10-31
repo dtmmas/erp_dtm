@@ -1,8 +1,7 @@
 import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useAuthStore } from '../store/auth'
 import { useConfigStore } from '../store/config'
-import { THEME_COLOR_OPTIONS, useThemeStore } from '../store/theme'
 import { formatCompanyName } from '../utils/text'
 
 export default function Layout() {
@@ -10,10 +9,8 @@ export default function Layout() {
   const navigate = useNavigate()
   const { user, logout, hasPermission, canSell } = useAuthStore()
   const config = useConfigStore(s => s.config)
-  const { mode, setMode, color, setColor } = useThemeStore()
   const companyName = formatCompanyName(config?.name)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
-  const [themePaletteOpen, setThemePaletteOpen] = useState(false)
   const [mobileMenuSections, setMobileMenuSections] = useState<Record<string, boolean>>({
     principal: true,
     procesos: false,
@@ -23,13 +20,10 @@ export default function Layout() {
     reportes: false,
     sistema: false
   })
-  const themePaletteRef = useRef<HTMLDivElement | null>(null)
   const closeMobileMenu = () => setMobileMenuOpen(false)
-  const currentThemeOption = THEME_COLOR_OPTIONS.find((option) => option.value === color) ?? THEME_COLOR_OPTIONS[0]
 
   useEffect(() => {
     setMobileMenuOpen(false)
-    setThemePaletteOpen(false)
   }, [location.pathname])
 
   useEffect(() => {
@@ -51,33 +45,20 @@ export default function Layout() {
     }
   }, [mobileMenuOpen])
 
-  useEffect(() => {
-    if (!themePaletteOpen) return
-
-    const handlePointerDown = (event: MouseEvent) => {
-      const target = event.target as HTMLElement | null
-      if (!target?.closest('.theme-palette-scope') && themePaletteRef.current && !themePaletteRef.current.contains(target as Node)) {
-        setThemePaletteOpen(false)
-      }
-    }
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setThemePaletteOpen(false)
-    }
-
-    document.addEventListener('mousedown', handlePointerDown)
-    window.addEventListener('keydown', handleKeyDown)
-
-    return () => {
-      document.removeEventListener('mousedown', handlePointerDown)
-      window.removeEventListener('keydown', handleKeyDown)
-    }
-  }, [themePaletteOpen])
-
   const isAdmin = String(user?.role || '').toUpperCase() === 'ADMIN'
   const canManageProducts = String(user?.role || '').toUpperCase() === 'ADMIN' || hasPermission('products:write')
   const productsMenuLabel = canManageProducts ? 'Productos' : 'Catalogo de productos'
   const defaultHomePath = isAdmin ? '/dashboard' : '/products'
+  const canAccessCash = hasPermission('cash:view') || hasPermission('cash:open') || hasPermission('cash:movements') || hasPermission('cash:close')
+  const canAccessMyShipments = hasPermission('shipments:my:read')
+  const showProcessesMenu = canSell() || hasPermission('credits:write') || hasPermission('purchases:read')
+  const showCatalogMenu = hasPermission('products:read') || hasPermission('customers:read') || hasPermission('categories:read') || hasPermission('brands:read') || hasPermission('departments:read') || hasPermission('units:read') || hasPermission('suppliers:read')
+  const showInventoryMenu = hasPermission('inventory:read')
+  const showWarehousesMenu = hasPermission('shelves:read') || hasPermission('warehouses:read') || hasPermission('transfers:read')
+  const showReportsMenu = hasPermission('sales:read') || hasPermission('credits:read') || hasPermission('cash:view') || hasPermission('cash:close')
+  const showSystemMenu = hasPermission('config:read') || hasPermission('logs:read') || hasPermission('users:read') || hasPermission('roles:read')
+  const showPrincipalMenu = isAdmin || canSell() || canAccessCash || canAccessMyShipments
+  const isWarehouseRole = String(user?.role || '').toUpperCase() === 'ALMACEN'
 
   const openPOSWindow = (event?: React.MouseEvent<HTMLButtonElement>) => {
     event?.preventDefault()
@@ -254,27 +235,6 @@ export default function Layout() {
     )
   }
 
-  const renderThemePalette = (mobile = false) => (
-    <div className={mobile ? 'theme-color-picker theme-color-picker-mobile' : 'theme-color-picker'} aria-label="Selector de color del tema">
-      {THEME_COLOR_OPTIONS.map((option) => (
-        <button
-          key={option.value}
-          type="button"
-          className={`theme-color-btn${color === option.value ? ' active' : ''}${mobile ? ' mobile' : ''}`}
-          onClick={() => {
-            setColor(option.value)
-            setThemePaletteOpen(false)
-          }}
-          aria-label={`Usar tema ${option.label}`}
-          title={`Tema ${option.label}`}
-        >
-          <span className="theme-color-dot" style={{ background: option.preview }} />
-          <span className="theme-color-name">{option.label}</span>
-        </button>
-      ))}
-    </div>
-  )
-
   return (
     <div className="app">
       <header className="header">
@@ -310,7 +270,7 @@ export default function Layout() {
             </button>
           )}
 
-          {(hasPermission('cash:view') || hasPermission('cash:open') || hasPermission('cash:movements') || hasPermission('cash:close') || hasPermission('sales:create')) && (
+          {canAccessCash && (
             <Link to="/cash-register" style={{ fontWeight: 'bold', color: '#eab308', display: 'flex', alignItems: 'center', gap: '8px', background: 'rgba(234, 179, 8, 0.1)', padding: '6px 12px', borderRadius: '8px' }}>
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <rect x="2" y="6" width="20" height="12" rx="2"></rect>
@@ -320,7 +280,18 @@ export default function Layout() {
               <span>CAJA</span>
             </Link>
           )}
-          {(canSell() || hasPermission('credits:read') || hasPermission('purchases:read')) && (
+          {(isAdmin || canAccessMyShipments) && (
+            <Link to="/my-shipments" style={{ fontWeight: 'bold', color: '#3b82f6', display: 'flex', alignItems: 'center', gap: '8px', background: 'rgba(59, 130, 246, 0.10)', padding: '6px 12px', borderRadius: '8px' }}>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 7h11v10H3z"></path>
+                <path d="M14 10h4l3 3v4h-7z"></path>
+                <circle cx="7.5" cy="19" r="1.5"></circle>
+                <circle cx="17.5" cy="19" r="1.5"></circle>
+              </svg>
+              <span>ENTREGAS</span>
+            </Link>
+          )}
+          {showProcessesMenu && (
             <div className="nav-group">
               <button className="nav-trigger" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -340,13 +311,13 @@ export default function Layout() {
                     Cotizaciones
                   </button>
                 )}
-                {hasPermission('credits:read') && <Link to="/credits">Créditos</Link>}
+                {hasPermission('credits:write') && <Link to="/credits">Créditos</Link>}
                 {hasPermission('purchases:read') && <Link to="/purchases">Compras</Link>}
               </div>
             </div>
           )}
 
-          {(hasPermission('products:read') || hasPermission('customers:read') || hasPermission('categories:read') || hasPermission('brands:read') || hasPermission('departments:read') || hasPermission('units:read') || hasPermission('suppliers:read')) && (
+          {showCatalogMenu && (
           <div className="nav-group">
             <button className="nav-trigger" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -368,7 +339,7 @@ export default function Layout() {
           )}
 
           {/* Inventory Group */}
-          {hasPermission('inventory:read') && (
+          {showInventoryMenu && (
           <div className="nav-group">
             <button className="nav-trigger" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -386,7 +357,7 @@ export default function Layout() {
           )}
 
           {/* Warehouses Group */}
-          {(hasPermission('shelves:read') || hasPermission('warehouses:read') || true) && ( // Assuming permissions, defaulting to true if specific perm missing in store
+          {showWarehousesMenu && (
           <div className="nav-group">
             <button className="nav-trigger" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -398,14 +369,15 @@ export default function Layout() {
               <span>ALMACENES</span>
             </button>
             <div className="nav-panel">
-              <Link to="/warehouses">Almacenes/Tiendas</Link>
-              <Link to="/transfers">Traslados</Link>
+              {hasPermission('warehouses:read') && <Link to="/warehouses">Almacenes/Tiendas</Link>}
+              {hasPermission('transfers:read') && <Link to="/transfers">Traslados</Link>}
+              {(isAdmin || isWarehouseRole) && <Link to="/shipments">Despachos</Link>}
               {hasPermission('shelves:read') && <Link to="/shelves">Ubicaciones</Link>}
             </div>
           </div>
           )}
 
-          {(hasPermission('sales:read') || hasPermission('credits:read') || hasPermission('cash:view') || hasPermission('cash:close')) && (
+          {showReportsMenu && (
             <div className="nav-group">
               <button className="nav-trigger" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -417,12 +389,14 @@ export default function Layout() {
               </button>
               <div className="nav-panel">
                 {hasPermission('sales:read') && (user?.role === 'ADMIN' ? <Link to="/sales">Historial Ventas</Link> : <Link to="/my-sales">Mis Ventas</Link>)}
+                {canAccessCash && !isAdmin && <Link to="/my-collections">Mis Cobros</Link>}
                 {hasPermission('credits:read') && <Link to="/credit-reports">Reporte Créditos</Link>}
                 {(hasPermission('cash:view') || hasPermission('cash:close')) && <Link to="/cash-history">Cierres de Caja</Link>}
               </div>
             </div>
           )}
 
+          {showSystemMenu && (
           <div className="nav-group">
             <button className="nav-trigger" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -438,43 +412,25 @@ export default function Layout() {
               {hasPermission('roles:read') && <Link to="/roles">Roles</Link>}
             </div>
           </div>
+          )}
         </nav>
         <div className="header-actions">
-          <div className="theme-controls">
-            <div className="view-toggle" aria-label="Selector de modo de tema">
-              <button className={`toggle-btn ${mode === 'light' ? 'active' : ''}`} onClick={() => setMode('light')}>Claro</button>
-              <button className={`toggle-btn ${mode === 'dark' ? 'active' : ''}`} onClick={() => setMode('dark')}>Oscuro</button>
-              <button className={`toggle-btn ${mode === 'system' ? 'active' : ''}`} onClick={() => setMode('system')}>Sistema</button>
-            </div>
-            <div className="theme-palette-dropdown theme-palette-scope" ref={themePaletteRef}>
-              <button
-                type="button"
-                className={`theme-palette-trigger${themePaletteOpen ? ' open' : ''}`}
-                onClick={() => setThemePaletteOpen((prev) => !prev)}
-                aria-expanded={themePaletteOpen}
-                aria-label="Abrir paleta de colores"
-              >
-                <span className="theme-palette-trigger-main">
-                  <span className="theme-color-dot" style={{ background: currentThemeOption.preview }} />
-                  <span className="theme-palette-trigger-label">Color</span>
-                  <span className="theme-palette-trigger-value">{currentThemeOption.label}</span>
-                </span>
-                <span className={`theme-palette-chevron${themePaletteOpen ? ' open' : ''}`}>
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <polyline points="6 9 12 15 18 9"></polyline>
-                  </svg>
-                </span>
-              </button>
-              {themePaletteOpen && (
-                <div className="theme-palette-menu">
-                  {renderThemePalette()}
-                </div>
-              )}
-            </div>
-          </div>
           <div className="user">
-            <span>{user?.name} ({user?.role})</span>
-            <button onClick={logout}>Salir</button>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+                <circle cx="12" cy="7" r="4"></circle>
+              </svg>
+              <span>{user?.name} ({user?.role})</span>
+            </span>
+            <button onClick={logout} style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+                <path d="M16 17l5-5-5-5"></path>
+                <path d="M21 12H9"></path>
+              </svg>
+              <span>Salir</span>
+            </button>
           </div>
           <button
             type="button"
@@ -511,26 +467,27 @@ export default function Layout() {
 
             <div className="mobile-menu-dialog-body">
               <div className="mobile-menu-grid">
-                {renderMobileMenuSection('principal', 'Principal', 'dashboard', (
+                {showPrincipalMenu && renderMobileMenuSection('principal', 'Principal', 'dashboard', (
                   <>
                     {isAdmin && renderMobileMenuLinkCard('/dashboard', 'Dashboard', 'Resumen general', 'dashboard')}
                     {canSell() && renderMobileMenuActionCard('Ventas / POS', 'Abrir punto de venta', 'pos', () => openPOSWindow())}
-                    {(hasPermission('cash:view') || hasPermission('cash:open') || hasPermission('cash:movements') || hasPermission('cash:close') || hasPermission('sales:create')) &&
+                    {canAccessCash &&
                       renderMobileMenuLinkCard('/cash-register', 'Caja', 'Operaciones de caja', 'cash')}
+                    {(isAdmin || canAccessMyShipments) && renderMobileMenuLinkCard('/my-shipments', 'Entregas', 'Mis entregas asignadas', 'warehouse')}
                   </>
                 ))}
 
-                {(canSell() || hasPermission('credits:read') || hasPermission('purchases:read')) && (
+                {showProcessesMenu && (
                   renderMobileMenuSection('procesos', 'Procesos', 'layers', (
                     <>
                       {canSell() && renderMobileMenuActionCard('Cotizaciones', 'Abrir cotizador', 'layers', () => openQuotationWindow())}
-                      {hasPermission('credits:read') && renderMobileMenuLinkCard('/credits', 'Créditos', 'Gestionar cobros', 'layers')}
+                      {hasPermission('credits:write') && renderMobileMenuLinkCard('/credits', 'Créditos', 'Gestionar cobros', 'layers')}
                       {hasPermission('purchases:read') && renderMobileMenuLinkCard('/purchases', 'Compras', 'Registrar entradas', 'layers')}
                     </>
                   ))
                 )}
 
-                {(hasPermission('products:read') || hasPermission('customers:read') || hasPermission('categories:read') || hasPermission('brands:read') || hasPermission('departments:read') || hasPermission('units:read') || hasPermission('suppliers:read')) && (
+                {showCatalogMenu && (
                   renderMobileMenuSection('catalogo', 'Catálogo', 'catalog', (
                     <>
                       {hasPermission('products:read') && renderMobileMenuLinkCard('/products', productsMenuLabel, 'Listado principal', 'catalog')}
@@ -544,7 +501,7 @@ export default function Layout() {
                   ))
                 )}
 
-                {hasPermission('inventory:read') && (
+                {showInventoryMenu && (
                   renderMobileMenuSection('inventario', 'Inventario', 'inventory', (
                     <>
                       {renderMobileMenuLinkCard('/inventory', 'Movimientos', 'Entradas y ajustes', 'inventory')}
@@ -553,23 +510,25 @@ export default function Layout() {
                   ))
                 )}
 
-                {(hasPermission('shelves:read') || hasPermission('warehouses:read') || true) && (
+                {showWarehousesMenu && (
                   renderMobileMenuSection('almacenes', 'Almacenes', 'warehouse', (
                     <>
-                      {renderMobileMenuLinkCard('/warehouses', 'Almacenes', 'Tiendas y bodegas', 'warehouse')}
-                      {renderMobileMenuLinkCard('/transfers', 'Traslados', 'Mover existencias', 'warehouse')}
+                      {hasPermission('warehouses:read') && renderMobileMenuLinkCard('/warehouses', 'Almacenes', 'Tiendas y bodegas', 'warehouse')}
+                      {hasPermission('transfers:read') && renderMobileMenuLinkCard('/transfers', 'Traslados', 'Mover existencias', 'warehouse')}
+                      {(isAdmin || isWarehouseRole) && renderMobileMenuLinkCard('/shipments', 'Despachos', 'Asignar entregas', 'warehouse')}
                       {hasPermission('shelves:read') && renderMobileMenuLinkCard('/shelves', 'Ubicaciones', 'Estantes y zonas', 'warehouse')}
                     </>
                   ))
                 )}
 
-                {(hasPermission('sales:read') || hasPermission('credits:read') || hasPermission('cash:view') || hasPermission('cash:close')) && (
+                {showReportsMenu && (
                   renderMobileMenuSection('reportes', 'Reportes', 'reports', (
                     <>
                       {hasPermission('sales:read') &&
                         (user?.role === 'ADMIN'
                           ? renderMobileMenuLinkCard('/sales', 'Historial ventas', 'Ventas registradas', 'reports')
                           : renderMobileMenuLinkCard('/my-sales', 'Mis ventas', 'Historial personal', 'reports'))}
+                      {canAccessCash && !isAdmin && renderMobileMenuLinkCard('/my-collections', 'Mis cobros', 'Ventas cobradas por ti', 'reports')}
                       {hasPermission('credits:read') && renderMobileMenuLinkCard('/credit-reports', 'Créditos', 'Reporte de cobros', 'reports')}
                       {(hasPermission('cash:view') || hasPermission('cash:close')) &&
                         renderMobileMenuLinkCard('/cash-history', 'Cierres caja', 'Historial de cierres', 'reports')}
@@ -577,7 +536,7 @@ export default function Layout() {
                   ))
                 )}
 
-                {renderMobileMenuSection('sistema', 'Sistema', 'settings', (
+                {showSystemMenu && renderMobileMenuSection('sistema', 'Sistema', 'settings', (
                   <>
                     {hasPermission('config:read') && renderMobileMenuLinkCard('/config', 'Config', 'Ajustes del sistema', 'settings')}
                     {hasPermission('logs:read') && renderMobileMenuLinkCard('/logs', 'Logs', 'Registro de eventos', 'settings')}
@@ -585,36 +544,6 @@ export default function Layout() {
                     {hasPermission('roles:read') && renderMobileMenuLinkCard('/roles', 'Roles', 'Permisos del sistema', 'settings')}
                   </>
                 ))}
-              </div>
-
-              <div className="mobile-theme-panel theme-palette-scope">
-                <div className="mobile-theme-panel-header">
-                  <div className="mobile-theme-panel-title">Tema visual</div>
-                  <div className="mobile-theme-panel-subtitle">Combina modo y color del sistema</div>
-                </div>
-                <div className="view-toggle mobile-view-toggle" aria-label="Selector de modo de tema">
-                  <button className={`toggle-btn ${mode === 'light' ? 'active' : ''}`} onClick={() => setMode('light')}>Claro</button>
-                  <button className={`toggle-btn ${mode === 'dark' ? 'active' : ''}`} onClick={() => setMode('dark')}>Oscuro</button>
-                  <button className={`toggle-btn ${mode === 'system' ? 'active' : ''}`} onClick={() => setMode('system')}>Sistema</button>
-                </div>
-                <button
-                  type="button"
-                  className={`theme-palette-mobile-trigger${themePaletteOpen ? ' open' : ''}`}
-                  onClick={() => setThemePaletteOpen((prev) => !prev)}
-                  aria-expanded={themePaletteOpen}
-                >
-                  <span className="theme-palette-trigger-main">
-                    <span className="theme-color-dot" style={{ background: currentThemeOption.preview }} />
-                    <span className="theme-palette-trigger-label">Paleta</span>
-                    <span className="theme-palette-trigger-value">{currentThemeOption.label}</span>
-                  </span>
-                  <span className={`theme-palette-chevron${themePaletteOpen ? ' open' : ''}`}>
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <polyline points="6 9 12 15 18 9"></polyline>
-                    </svg>
-                  </span>
-                </button>
-                {themePaletteOpen && renderThemePalette(true)}
               </div>
 
               <div className="mobile-menu-session">
@@ -626,7 +555,14 @@ export default function Layout() {
                   </div>
                 </div>
                 <button type="button" className="mobile-menu-session-logout" onClick={() => { logout(); closeMobileMenu() }}>
-                  Salir
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+                      <path d="M16 17l5-5-5-5"></path>
+                      <path d="M21 12H9"></path>
+                    </svg>
+                    <span>Salir</span>
+                  </span>
                 </button>
               </div>
             </div>

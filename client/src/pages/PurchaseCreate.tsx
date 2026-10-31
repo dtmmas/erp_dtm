@@ -54,7 +54,14 @@ export default function PurchaseCreate() {
   const [docNo, setDocNo] = useState('')
   const [notes, setNotes] = useState('')
   const [file, setFile] = useState<File | null>(null)
+  const [paymentFile, setPaymentFile] = useState<File | null>(null)
   const [items, setItems] = useState<PurchaseItem[]>([])
+  const [paymentType, setPaymentType] = useState<'CASH' | 'CREDIT'>('CASH')
+  const [paymentMethod, setPaymentMethod] = useState<'CASH' | 'CARD' | 'DEPOSIT'>('CASH')
+  const [initialPayment, setInitialPayment] = useState('')
+  const [dueDate, setDueDate] = useState('')
+  const [paymentReference, setPaymentReference] = useState('')
+  const [paymentNotes, setPaymentNotes] = useState('')
   
   // Product Search State
   const [isProductModalOpen, setIsProductModalOpen] = useState(false)
@@ -64,6 +71,36 @@ export default function PurchaseCreate() {
   
   const navigate = useNavigate()
   const config = useConfigStore(s => s.config)
+  const panelPadding = isMobileViewport ? 14 : 20
+  const controlPadding = isMobileViewport ? '10px 12px' : 8
+  const baseFieldStyle: React.CSSProperties = {
+    width: '100%',
+    padding: controlPadding,
+    borderRadius: 10,
+    border: '1px solid var(--border)',
+    background: 'var(--bg)',
+    color: 'var(--text)',
+    minHeight: isMobileViewport ? 44 : undefined,
+  }
+  const mutedFieldStyle: React.CSSProperties = {
+    ...baseFieldStyle,
+    background: 'var(--surface)',
+  }
+  const sectionStyle: React.CSSProperties = {
+    padding: panelPadding,
+    backgroundColor: 'var(--modal)',
+    borderRadius: 12,
+    border: '1px solid var(--border)',
+    display: 'grid',
+    gap: isMobileViewport ? 14 : 16,
+  }
+  const summaryCardStyle: React.CSSProperties = {
+    border: '1px solid var(--border)',
+    borderRadius: 12,
+    background: 'var(--modal)',
+    padding: isMobileViewport ? 12 : 14,
+    minWidth: 0,
+  }
 
   useEffect(() => {
     loadData()
@@ -259,10 +296,23 @@ export default function PurchaseCreate() {
   }
 
   const total = items.reduce((sum, item) => sum + (item.quantity * item.unitCost), 0)
+  const normalizedInitialPayment = useMemo(() => {
+    if (paymentType === 'CASH') return total
+    const parsed = Number(initialPayment || 0)
+    if (!Number.isFinite(parsed)) return 0
+    return Math.min(total, Math.max(0, parsed))
+  }, [paymentType, initialPayment, total])
+  const balanceDue = Math.max(0, total - normalizedInitialPayment)
 
   async function handleSubmit() {
     if (!supplierId) return alert('Seleccione un proveedor')
     if (items.length === 0) return alert('Agregue productos a la compra')
+    if (paymentType === 'CREDIT' && balanceDue > 0 && !dueDate) {
+      return alert('Ingrese fecha de vencimiento para compras al credito')
+    }
+    if ((paymentMethod === 'CARD' || paymentMethod === 'DEPOSIT') && normalizedInitialPayment > 0 && !paymentReference.trim()) {
+      return alert('Ingrese referencia para pagos con tarjeta o deposito')
+    }
 
     // Validation for Medicinal products (batches)
     for (const item of items) {
@@ -310,9 +360,18 @@ export default function PurchaseCreate() {
       formData.append('docNo', docNo)
       formData.append('notes', notes)
       formData.append('total', String(total))
+      formData.append('paymentType', paymentType)
+      formData.append('paymentMethod', paymentMethod)
+      formData.append('initialPayment', String(normalizedInitialPayment))
+      if (dueDate) formData.append('dueDate', dueDate)
+      if (paymentReference.trim()) formData.append('paymentReference', paymentReference.trim())
+      if (paymentNotes.trim()) formData.append('paymentNotes', paymentNotes.trim())
       formData.append('items', JSON.stringify(payloadItems))
       if (file) {
         formData.append('document', file)
+      }
+      if (paymentFile) {
+        formData.append('paymentDocument', paymentFile)
       }
 
       await api.post('/purchases', formData)
@@ -330,70 +389,216 @@ export default function PurchaseCreate() {
     <div style={{ padding: isMobileViewport ? 14 : 20, maxWidth: 1200, margin: '0 auto', height: '100%', display: 'flex', flexDirection: 'column' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: isMobileViewport ? 'stretch' : 'center', flexDirection: isMobileViewport ? 'column' : 'row', gap: 12, marginBottom: 20 }}>
         <h1>Nueva Compra</h1>
-        <button className="btn-secondary" onClick={() => navigate('/purchases')}>Cancelar</button>
+        <button className="btn-secondary" style={{ width: isMobileViewport ? '100%' : 'auto' }} onClick={() => navigate('/purchases')}>Cancelar</button>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: isMobileViewport ? '1fr' : 'repeat(auto-fit, minmax(200px, 1fr))', gap: 20, marginBottom: 20, padding: isMobileViewport ? 14 : 20, backgroundColor: 'var(--modal)', borderRadius: 8, border: '1px solid var(--border)' }}>
-        <div>
-          <label style={{ display: 'block', marginBottom: 8, fontWeight: 'bold' }}>Proveedor</label>
-          <select 
-            value={supplierId} 
-            onChange={e => setSupplierId(Number(e.target.value))}
-            style={{ width: '100%', padding: 8, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' }}
-          >
-            <option value="">Seleccione Proveedor</option>
-            {suppliers.map(s => (
-              <option key={s.id} value={s.id}>{s.name}</option>
-            ))}
-          </select>
-        </div>
-        <div>
-            <label style={{ display: 'block', marginBottom: 8, fontWeight: 'bold' }}>Almacén Destino (Opcional)</label>
-            <select 
-                value={warehouseId} 
-                onChange={e => setWarehouseId(e.target.value ? Number(e.target.value) : '')}
-                style={{ width: '100%', padding: 8, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' }}
-            >
-                {warehouses.map(w => (
-                <option key={w.id} value={w.id}>{w.name}</option>
+      <div style={{ display: 'grid', gridTemplateColumns: isMobileViewport ? '1fr' : '1.15fr 1fr', gap: 20, marginBottom: 20 }}>
+        <section style={sectionStyle}>
+          <div>
+            <h3 style={{ margin: 0, fontSize: '1rem' }}>Datos de la Compra</h3>
+            <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>
+              Informacion propia de la factura, proveedor y archivo de la compra.
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: isMobileViewport ? '1fr' : 'repeat(2, minmax(0, 1fr))', gap: 16 }}>
+            <div>
+              <label style={{ display: 'block', marginBottom: 8, fontWeight: 'bold' }}>Proveedor</label>
+              <select
+                value={supplierId}
+                onChange={e => setSupplierId(Number(e.target.value))}
+                style={baseFieldStyle}
+              >
+                <option value="">Seleccione Proveedor</option>
+                {suppliers.map(s => (
+                  <option key={s.id} value={s.id}>{s.name}</option>
                 ))}
-            </select>
+              </select>
+            </div>
+
+            <div>
+              <label style={{ display: 'block', marginBottom: 8, fontWeight: 'bold' }}>Almacén Destino (Opcional)</label>
+              <select
+                value={warehouseId}
+                onChange={e => setWarehouseId(e.target.value ? Number(e.target.value) : '')}
+                style={baseFieldStyle}
+              >
+                {warehouses.map(w => (
+                  <option key={w.id} value={w.id}>{w.name}</option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label style={{ display: 'block', marginBottom: 8, fontWeight: 'bold' }}>N° Documento / Factura</label>
+              <input
+                type="text"
+                value={docNo}
+                onChange={e => setDocNo(e.target.value)}
+                style={baseFieldStyle}
+                placeholder="Ej. F001-12345"
+              />
+            </div>
+
+            <div>
+              <label style={{ display: 'block', marginBottom: 8, fontWeight: 'bold' }}>Documento de Compra (PDF/Img)</label>
+              <input
+                type="file"
+                accept=".pdf,image/*"
+                onChange={e => setFile(e.target.files?.[0] || null)}
+                style={{ ...baseFieldStyle, padding: isMobileViewport ? 10 : 5 }}
+              />
+              <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 6, wordBreak: 'break-word' }}>
+                {file ? `Archivo seleccionado: ${file.name}` : 'Puedes subir factura, orden o imagen del documento.'}
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <label style={{ display: 'block', marginBottom: 8, fontWeight: 'bold' }}>Notas</label>
+            <textarea
+              value={notes}
+              onChange={e => setNotes(e.target.value)}
+              rows={isMobileViewport ? 3 : 2}
+              style={{ ...baseFieldStyle, resize: 'vertical', minHeight: isMobileViewport ? 92 : 74 }}
+              placeholder="Observaciones..."
+            />
+          </div>
+        </section>
+
+        <section style={sectionStyle}>
+          <div>
+            <h3 style={{ margin: 0, fontSize: '1rem' }}>Datos del Pago</h3>
+            <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>
+              Define si la factura fue al contado o credito, con su abono, referencia y comprobante.
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: isMobileViewport ? '1fr' : 'repeat(2, minmax(0, 1fr))', gap: 16 }}>
+            <div>
+              <label style={{ display: 'block', marginBottom: 8, fontWeight: 'bold' }}>Tipo de Pago</label>
+              <select
+                value={paymentType}
+                onChange={e => setPaymentType(e.target.value as 'CASH' | 'CREDIT')}
+                style={baseFieldStyle}
+              >
+                <option value="CASH">Contado</option>
+                <option value="CREDIT">Credito por pagar</option>
+              </select>
+            </div>
+
+            <div>
+              <label style={{ display: 'block', marginBottom: 8, fontWeight: 'bold' }}>Metodo de Pago</label>
+              <select
+                value={paymentMethod}
+                onChange={e => setPaymentMethod(e.target.value as 'CASH' | 'CARD' | 'DEPOSIT')}
+                style={baseFieldStyle}
+              >
+                <option value="CASH">Efectivo</option>
+                <option value="CARD">Tarjeta</option>
+                <option value="DEPOSIT">Deposito</option>
+              </select>
+            </div>
+
+            <div>
+              <label style={{ display: 'block', marginBottom: 8, fontWeight: 'bold' }}>
+                {paymentType === 'CASH' ? 'Pagado' : 'Abono Inicial'}
+              </label>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={paymentType === 'CASH' ? total : initialPayment}
+                onChange={e => setInitialPayment(e.target.value)}
+                disabled={paymentType === 'CASH'}
+                style={paymentType === 'CASH' ? mutedFieldStyle : baseFieldStyle}
+                placeholder={paymentType === 'CASH' ? 'Se pagara el total' : '0.00'}
+              />
+            </div>
+
+            <div>
+              <label style={{ display: 'block', marginBottom: 8, fontWeight: 'bold' }}>Vence el</label>
+              <input
+                type="date"
+                value={dueDate}
+                onChange={e => setDueDate(e.target.value)}
+                disabled={paymentType !== 'CREDIT' || balanceDue <= 0}
+                style={paymentType !== 'CREDIT' || balanceDue <= 0 ? mutedFieldStyle : baseFieldStyle}
+              />
+            </div>
+
+            <div>
+              <label style={{ display: 'block', marginBottom: 8, fontWeight: 'bold' }}>Referencia</label>
+              <input
+                type="text"
+                value={paymentReference}
+                onChange={e => setPaymentReference(e.target.value)}
+                style={baseFieldStyle}
+                placeholder={paymentMethod === 'CASH' ? 'Opcional' : 'Requerido para tarjeta/deposito'}
+              />
+            </div>
+
+            <div>
+              <label style={{ display: 'block', marginBottom: 8, fontWeight: 'bold' }}>Comprobante de Pago</label>
+              <input
+                type="file"
+                accept="image/*,.pdf"
+                disabled={normalizedInitialPayment <= 0}
+                onChange={e => setPaymentFile(e.target.files?.[0] || null)}
+                style={{ ...(normalizedInitialPayment <= 0 ? mutedFieldStyle : baseFieldStyle), padding: isMobileViewport ? 10 : 5 }}
+              />
+              <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 6, wordBreak: 'break-word' }}>
+                {paymentFile ? `Comprobante seleccionado: ${paymentFile.name}` : 'Adjunta el comprobante si se realizo pago o abono.'}
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <label style={{ display: 'block', marginBottom: 8, fontWeight: 'bold' }}>Nota de Pago</label>
+            <textarea
+              value={paymentNotes}
+              onChange={e => setPaymentNotes(e.target.value)}
+              rows={isMobileViewport ? 3 : 2}
+              style={{ ...baseFieldStyle, resize: 'vertical', minHeight: isMobileViewport ? 92 : 74 }}
+              placeholder="Ej. abono inicial del proveedor"
+            />
+            <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 6 }}>
+              Sube imagen o PDF del deposito, transferencia o voucher del pago realizado.
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: isMobileViewport ? 'repeat(2, minmax(0, 1fr))' : 'repeat(4, minmax(0, 1fr))', gap: 12, marginBottom: 20 }}>
+        <div style={summaryCardStyle}>
+          <div style={{ fontSize: 12, color: 'var(--muted)' }}>Total Factura</div>
+          <div style={{ fontWeight: 800, fontSize: isMobileViewport ? '1rem' : '1.1rem', wordBreak: 'break-word' }}>{formatMoney(total, config?.currency)}</div>
         </div>
-        <div>
-          <label style={{ display: 'block', marginBottom: 8, fontWeight: 'bold' }}>N° Documento / Factura</label>
-          <input 
-            type="text" 
-            value={docNo} 
-            onChange={e => setDocNo(e.target.value)}
-            style={{ width: '100%', padding: 8, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' }}
-            placeholder="Ej. F001-12345"
-          />
+        <div style={summaryCardStyle}>
+          <div style={{ fontSize: 12, color: 'var(--muted)' }}>Pagado al Registrar</div>
+          <div style={{ fontWeight: 800, fontSize: isMobileViewport ? '1rem' : '1.1rem', color: '#22c55e', wordBreak: 'break-word' }}>{formatMoney(normalizedInitialPayment, config?.currency)}</div>
         </div>
-        <div>
-          <label style={{ display: 'block', marginBottom: 8, fontWeight: 'bold' }}>Notas</label>
-          <input 
-            type="text" 
-            value={notes} 
-            onChange={e => setNotes(e.target.value)}
-            style={{ width: '100%', padding: 8, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' }}
-            placeholder="Observaciones..."
-          />
+        <div style={summaryCardStyle}>
+          <div style={{ fontSize: 12, color: 'var(--muted)' }}>Saldo Pendiente</div>
+          <div style={{ fontWeight: 800, fontSize: isMobileViewport ? '1rem' : '1.1rem', color: balanceDue > 0 ? '#f59e0b' : '#22c55e', wordBreak: 'break-word' }}>{formatMoney(balanceDue, config?.currency)}</div>
         </div>
-        <div>
-          <label style={{ display: 'block', marginBottom: 8, fontWeight: 'bold' }}>Documento (PDF/Img)</label>
-          <input 
-            type="file" 
-            accept=".pdf,image/*"
-            onChange={e => setFile(e.target.files?.[0] || null)}
-            style={{ width: '100%', padding: 5, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' }}
-          />
+        <div style={summaryCardStyle}>
+          <div style={{ fontSize: 12, color: 'var(--muted)' }}>Estado de Pago</div>
+          <div style={{ fontWeight: 800, fontSize: isMobileViewport ? '0.95rem' : '1.1rem' }}>
+            {balanceDue <= 0 ? 'PAGADO' : normalizedInitialPayment > 0 ? 'ABONO PARCIAL' : paymentType === 'CREDIT' ? 'POR PAGAR' : 'PENDIENTE'}
+          </div>
         </div>
       </div>
 
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 10 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: isMobileViewport ? 'stretch' : 'center', flexDirection: isMobileViewport ? 'column' : 'row', gap: 12 }}>
-          <h3>Detalle de Productos</h3>
-          <button className="btn-primary" onClick={() => setIsProductModalOpen(true)}>+ Agregar Producto</button>
+          <div>
+            <h3 style={{ marginBottom: 4 }}>Detalle de Productos</h3>
+            <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+              {items.length} {items.length === 1 ? 'producto agregado' : 'productos agregados'}
+            </div>
+          </div>
+          <button className="btn-primary" style={{ width: isMobileViewport ? '100%' : 'auto' }} onClick={() => setIsProductModalOpen(true)}>+ Agregar Producto</button>
         </div>
 
         {isMobileViewport ? (
@@ -401,32 +606,35 @@ export default function PurchaseCreate() {
             {items.map((item, i) => (
               <div key={item.productId + '_' + i} style={{ border: '1px solid var(--border)', borderRadius: 12, backgroundColor: 'var(--modal)', padding: 14, display: 'grid', gap: 10 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
-                  <div>
+                  <div style={{ minWidth: 0 }}>
                     <div style={{ fontWeight: 'bold' }}>{item.name}</div>
-                    <div style={{ fontSize: '0.8em', opacity: 0.7 }}>{item.code}</div>
+                    <div style={{ fontSize: '0.8em', opacity: 0.7, wordBreak: 'break-word' }}>{item.code}</div>
                   </div>
-                  <button onClick={() => removeItem(i)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: 'red', padding: 0 }}>✕</button>
+                  <button onClick={() => removeItem(i)} style={{ border: '1px solid rgba(239,68,68,0.25)', background: 'rgba(239,68,68,0.08)', cursor: 'pointer', color: '#ef4444', padding: '8px 10px', borderRadius: 10, minWidth: 42, minHeight: 42 }}>✕</button>
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 10 }}>
                   <div>
-                    <label>Cantidad</label>
-                    <input type="number" min="1" value={item.quantity} onChange={e => updateItem(i, 'quantity', Number(e.target.value))} style={{ width: '100%', textAlign: 'center', padding: 6, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' }} />
+                    <label style={{ display: 'block', marginBottom: 6 }}>Cantidad</label>
+                    <input type="number" min="1" value={item.quantity} onChange={e => updateItem(i, 'quantity', Number(e.target.value))} style={{ ...baseFieldStyle, textAlign: 'center', padding: '10px 8px' }} />
                   </div>
                   <div>
-                    <label>Costo Unit.</label>
-                    <input type="number" min="0" step="0.01" value={item.unitCost} onChange={e => updateItem(i, 'unitCost', Number(e.target.value))} style={{ width: '100%', textAlign: 'right', padding: 6, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' }} />
+                    <label style={{ display: 'block', marginBottom: 6 }}>Costo Unit.</label>
+                    <input type="number" min="0" step="0.01" value={item.unitCost} onChange={e => updateItem(i, 'unitCost', Number(e.target.value))} style={{ ...baseFieldStyle, textAlign: 'right', padding: '10px 8px' }} />
                   </div>
                 </div>
-                <div style={{ fontWeight: 700 }}>Subtotal: {formatMoney(item.quantity * item.unitCost, config?.currency)}</div>
+                <div style={{ fontWeight: 700, padding: '8px 10px', borderRadius: 10, background: 'var(--surface)' }}>
+                  Subtotal: {formatMoney(item.quantity * item.unitCost, config?.currency)}
+                </div>
                 {item.productType === 'MEDICINAL' && (
                   <div style={{ marginTop: 5 }}>
+                    <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 8 }}>Lotes del producto</div>
                     {item.batches?.map((batch, bIdx) => (
                       <div key={bIdx} style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 6, marginBottom: 8 }}>
-                        <input placeholder="Lote" value={batch.batchNo} onChange={e => updateBatch(i, bIdx, 'batchNo', e.target.value)} style={{ padding: 6, fontSize: '0.9em', borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' }} />
-                        <input type="date" value={batch.expiryDate} onChange={e => updateBatch(i, bIdx, 'expiryDate', e.target.value)} style={{ padding: 6, fontSize: '0.9em', borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' }} />
+                        <input placeholder="Lote" value={batch.batchNo} onChange={e => updateBatch(i, bIdx, 'batchNo', e.target.value)} style={{ ...baseFieldStyle, fontSize: '0.9em' }} />
+                        <input type="date" value={batch.expiryDate} onChange={e => updateBatch(i, bIdx, 'expiryDate', e.target.value)} style={{ ...baseFieldStyle, fontSize: '0.9em' }} />
                         <div style={{ display: 'flex', gap: 8 }}>
-                          <input type="number" placeholder="Cant." value={batch.quantity} onChange={e => updateBatch(i, bIdx, 'quantity', Number(e.target.value))} style={{ padding: 6, flex: 1, fontSize: '0.9em', borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' }} />
-                          {item.batches && item.batches.length > 1 && <button onClick={() => removeBatch(i, bIdx)} style={{ color: 'red', border: 'none', background: 'none', cursor: 'pointer', padding: 4 }} title="Eliminar lote">✕</button>}
+                          <input type="number" placeholder="Cant." value={batch.quantity} onChange={e => updateBatch(i, bIdx, 'quantity', Number(e.target.value))} style={{ ...baseFieldStyle, flex: 1, fontSize: '0.9em' }} />
+                          {item.batches && item.batches.length > 1 && <button onClick={() => removeBatch(i, bIdx)} style={{ color: '#ef4444', border: '1px solid rgba(239,68,68,0.25)', background: 'rgba(239,68,68,0.08)', cursor: 'pointer', padding: '0 14px', borderRadius: 10, minHeight: 44 }} title="Eliminar lote">✕</button>}
                         </div>
                       </div>
                     ))}
@@ -437,8 +645,11 @@ export default function PurchaseCreate() {
                 )}
                 {(item.productType === 'IMEI' || item.productType === 'SERIAL') && (
                   <div style={{ marginTop: 5 }}>
+                    <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 8 }}>
+                      {item.productType === 'IMEI' ? 'IMEIs requeridos' : 'Seriales requeridos'}
+                    </div>
                     {item.imeiEntries?.map((entry, idx) => (
-                      <input key={idx} placeholder={`Ingrese ${item.productType} #${idx + 1}`} value={entry} onChange={e => updateImeiEntry(i, idx, e.target.value)} style={{ display: 'block', width: '100%', padding: 6, fontSize: '0.9em', marginBottom: 6, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' }} />
+                      <input key={idx} placeholder={`Ingrese ${item.productType} #${idx + 1}`} value={entry} onChange={e => updateImeiEntry(i, idx, e.target.value)} style={{ ...baseFieldStyle, display: 'block', fontSize: '0.9em', marginBottom: 6 }} />
                     ))}
                   </div>
                 )}
@@ -585,13 +796,13 @@ export default function PurchaseCreate() {
         </div>
         )}
 
-        <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: isMobileViewport ? 'stretch' : 'center', flexDirection: isMobileViewport ? 'column' : 'row', gap: 20, padding: 20, borderTop: '1px solid var(--border)' }}>
-          <div style={{ fontSize: '1.5em', fontWeight: 'bold' }}>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: isMobileViewport ? 'stretch' : 'center', flexDirection: isMobileViewport ? 'column' : 'row', gap: 14, padding: isMobileViewport ? '14px 0 calc(14px + env(safe-area-inset-bottom, 0px))' : 20, borderTop: '1px solid var(--border)', position: isMobileViewport ? 'sticky' : 'static', bottom: 0, background: isMobileViewport ? 'linear-gradient(180deg, rgba(0,0,0,0) 0%, var(--bg) 22%)' : 'transparent' }}>
+          <div style={{ fontSize: isMobileViewport ? '1.15rem' : '1.5em', fontWeight: 'bold', textAlign: isMobileViewport ? 'center' : 'right' }}>
             Total: {formatMoney(total, config?.currency)}
           </div>
           <button 
             className="btn-primary" 
-            style={{ fontSize: '1.2em', padding: '10px 30px', width: isMobileViewport ? '100%' : 'auto' }}
+            style={{ fontSize: isMobileViewport ? '1rem' : '1.2em', padding: isMobileViewport ? '12px 18px' : '10px 30px', width: isMobileViewport ? '100%' : 'auto', minHeight: isMobileViewport ? 48 : undefined }}
             onClick={handleSubmit}
             disabled={loading}
           >
@@ -603,14 +814,15 @@ export default function PurchaseCreate() {
       {isProductModalOpen && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', justifyContent: 'center', alignItems: isMobileViewport ? 'flex-end' : 'center', zIndex: 100, padding: isMobileViewport ? 0 : 16 }}>
           <div style={{ background: 'var(--modal)', padding: isMobileViewport ? 16 : 20, borderRadius: isMobileViewport ? '18px 18px 0 0' : 8, width: isMobileViewport ? '100%' : 600, maxWidth: isMobileViewport ? '100%' : 600, maxHeight: isMobileViewport ? '88vh' : '80vh', display: 'flex', flexDirection: 'column' }}>
-            <h3>Buscar Producto</h3>
+            <div style={{ width: 48, height: 5, borderRadius: 999, background: 'var(--border)', alignSelf: 'center', marginBottom: 12 }} />
+            <h3 style={{ marginTop: 0 }}>Buscar Producto</h3>
             <input 
               autoFocus
               type="text" 
               placeholder="Buscar por nombre, SKU, código, descripción, alterno o genérico..." 
               value={productSearch}
               onChange={e => setProductSearch(e.target.value)}
-              style={{ width: '100%', padding: 10, marginBottom: 10, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)' }}
+              style={{ ...baseFieldStyle, marginBottom: 10 }}
             />
             <div style={{ fontSize: '0.8em', color: 'var(--muted)', marginBottom: 10 }}>
               Usa las mismas variables del catálogo. Puedes escribir varias palabras en cualquier orden.

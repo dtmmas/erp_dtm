@@ -6,6 +6,8 @@ interface Warehouse {
   name: string
   type: 'ALMACEN' | 'TIENDA'
   address: string
+  contract_phone?: string
+  contract_facebook?: string
   status: 'ACTIVO' | 'INACTIVO'
 }
 
@@ -22,6 +24,8 @@ export default function Warehouses() {
     name: '',
     type: 'ALMACEN' as 'ALMACEN' | 'TIENDA',
     address: '',
+    contract_phone: '',
+    contract_facebook: '',
     status: 'ACTIVO' as 'ACTIVO' | 'INACTIVO'
   })
 
@@ -45,7 +49,7 @@ export default function Warehouses() {
   }, [])
 
   const resetForm = () => {
-    setFormData({ name: '', type: 'ALMACEN', address: '', status: 'ACTIVO' })
+    setFormData({ name: '', type: 'ALMACEN', address: '', contract_phone: '', contract_facebook: '', status: 'ACTIVO' })
   }
 
   const startCreate = () => {
@@ -59,6 +63,8 @@ export default function Warehouses() {
       name: w.name,
       type: w.type,
       address: w.address || '',
+      contract_phone: w.contract_phone || '',
+      contract_facebook: w.contract_facebook || '',
       status: w.status
     })
     setShowEdit(true)
@@ -250,6 +256,24 @@ export default function Warehouses() {
                 <input 
                   value={formData.address} 
                   onChange={e => setFormData({...formData, address: e.target.value})}
+                  style={{ width: '100%', padding: 8 }}
+                />
+              </div>
+
+              <div>
+                <label style={{ display: 'block', marginBottom: 4 }}>CEL (Contratos)</label>
+                <input 
+                  value={formData.contract_phone} 
+                  onChange={e => setFormData({...formData, contract_phone: e.target.value})}
+                  style={{ width: '100%', padding: 8 }}
+                />
+              </div>
+
+              <div>
+                <label style={{ display: 'block', marginBottom: 4 }}>Facebook (Contratos)</label>
+                <input 
+                  value={formData.contract_facebook} 
+                  onChange={e => setFormData({...formData, contract_facebook: e.target.value})}
                   style={{ width: '100%', padding: 8 }}
                 />
               </div>

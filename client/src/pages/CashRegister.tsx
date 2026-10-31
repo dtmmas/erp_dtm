@@ -1,4 +1,5 @@
 import { useState, useEffect, type FormEvent } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { 
   api,
   getCashStatus, 
@@ -6,7 +7,11 @@ import {
   closeCashRegister, 
   getCashSummary, 
   addCashMovement, 
-  getCashMovements 
+  getCashMovements,
+  getPendingPaymentSales,
+  getSaleDetails,
+  collectPendingSalePayment,
+  getCreditContractBySale,
 } from '../api'
 import { useAuthStore } from '../store/auth'
 import { useConfigStore } from '../store/config'
@@ -14,8 +19,124 @@ import { formatDateTime } from '../utils/date'
 import { formatNumber } from '../utils/currency'
 import { buildPrintLogoHtml } from '../utils/printBranding'
 
+// #region debug-point credit-installment-mismatch-client
+const __dbgClientUrl = 'http://127.0.0.1:7777/event'
+async function __dbgClientReport(event: any) {
+  try {
+    if (typeof window === 'undefined') return
+    if (localStorage.getItem('dbg_credit_installment_mismatch') !== '1') return
+    await fetch(__dbgClientUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        sessionId: 'credit-installment-mismatch',
+        at: new Date().toISOString(),
+        side: 'client',
+        ...event,
+      }),
+    })
+  } catch {}
+}
+// #endregion debug-point credit-installment-mismatch-client
+
+type CreditInstallmentDraft = {
+  amount: string
+  dueDate: string
+}
+
+type CreditInstallmentFrequency = 'WEEKLY' | 'BIWEEKLY' | 'MONTHLY'
+
+function formatInputDate(date: Date) {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function addDaysToInputDate(baseDate: string | Date, days: number) {
+  const base = typeof baseDate === 'string'
+    ? new Date(`${(baseDate || formatInputDate(new Date())).slice(0, 10)}T12:00:00`)
+    : new Date(baseDate)
+  base.setDate(base.getDate() + days)
+  return formatInputDate(base)
+}
+
+function getCreditFrequencyDays(frequency: CreditInstallmentFrequency) {
+  if (frequency === 'WEEKLY') return 7
+  if (frequency === 'BIWEEKLY') return 15
+  return 30
+}
+
+function buildCreditInstallmentDrafts(total: number, count: number, firstDueDate?: string, frequency: CreditInstallmentFrequency = 'MONTHLY'): CreditInstallmentDraft[] {
+  const safeCount = Math.max(1, Math.min(36, Number(count) || 1))
+  const totalCents = Math.max(0, Math.round(Number(total || 0) * 100))
+  const baseAmount = Math.floor(totalCents / safeCount)
+  let remainder = totalCents - (baseAmount * safeCount)
+  const stepDays = getCreditFrequencyDays(frequency)
+  const startDate = firstDueDate || addDaysToInputDate(new Date(), stepDays)
+
+  return Array.from({ length: safeCount }, (_, index) => {
+    const cents = baseAmount + (remainder > 0 ? 1 : 0)
+    remainder = Math.max(0, remainder - 1)
+    return {
+      amount: (cents / 100).toFixed(2),
+      dueDate: index === 0 ? startDate : addDaysToInputDate(startDate, index * stepDays),
+    }
+  })
+}
+
+function validateCreditInstallments(installments: CreditInstallmentDraft[], total: number) {
+  if (!Array.isArray(installments) || installments.length === 0) {
+    return { valid: false, error: 'Debes registrar al menos una cuota para el crédito' }
+  }
+
+  const normalized = installments.map((installment, index) => {
+    const amount = Math.round(Number(installment.amount || 0) * 100) / 100
+    const dueDate = String(installment.dueDate || '').trim()
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      void __dbgClientReport({ point: 'validate-installments-invalid-amount', index, amount: installment.amount, total })
+      return { error: `La cuota #${index + 1} debe tener un monto válido` }
+    }
+
+    if (!dueDate) {
+      void __dbgClientReport({ point: 'validate-installments-missing-date', index, amount, total })
+      return { error: `La cuota #${index + 1} debe tener fecha de vencimiento` }
+    }
+
+    return { amount, dueDate }
+  })
+
+  const invalid = normalized.find(item => 'error' in item)
+  if (invalid && 'error' in invalid) {
+    return { valid: false, error: invalid.error }
+  }
+
+  const installmentsTotal = Math.round(
+    (normalized as Array<{ amount: number; dueDate: string }>).reduce((sum, installment) => sum + installment.amount, 0) * 100
+  ) / 100
+  const expectedTotal = Math.round(Number(total || 0) * 100) / 100
+
+  if (Math.abs(installmentsTotal - expectedTotal) > 0.01) {
+    void __dbgClientReport({
+      point: 'validate-installments-sum-mismatch',
+      expectedTotal,
+      installmentsTotal,
+      diff: Math.round((expectedTotal - installmentsTotal) * 100) / 100,
+      installments: (normalized as Array<{ amount: number; dueDate: string }>).map(it => it.amount),
+    })
+    return { valid: false, error: 'La suma de las cuotas no coincide con el total de la venta' }
+  }
+
+  return {
+    valid: true,
+    installments: normalized as Array<{ amount: number; dueDate: string }>,
+  }
+}
+
 export default function CashRegister() {
   const { user } = useAuthStore()
+  const navigate = useNavigate()
   const config = useConfigStore(s => s.config)
   const isAdmin = user?.role === 'ADMIN'
   const [isMobileViewport, setIsMobileViewport] = useState(false)
@@ -26,6 +147,15 @@ export default function CashRegister() {
   const [isOpen, setIsOpen] = useState(false)
   const [summary, setSummary] = useState<any>(null)
   const [movements, setMovements] = useState<any[]>([])
+  const [pendingSales, setPendingSales] = useState<Array<{
+    id: number
+    docNo: string
+    total: number
+    createdAt: string
+    customerName: string
+    sellerName: string
+    itemsCount: number
+  }>>([])
   const [users, setUsers] = useState<Array<{ id: number; name: string; role_name?: string }>>([])
   const [selectedUserId, setSelectedUserId] = useState<number | null>(null)
   
@@ -42,6 +172,34 @@ export default function CashRegister() {
   const [showCloseModal, setShowCloseModal] = useState(false)
   const [closingAmount, setClosingAmount] = useState('')
   const [closeResult, setCloseResult] = useState<any>(null)
+  const [showCollectModal, setShowCollectModal] = useState(false)
+  const [collectingSale, setCollectingSale] = useState<{
+    id: number
+    docNo: string
+    total: number
+    createdAt: string
+    customerName: string
+    sellerName: string
+    itemsCount: number
+  } | null>(null)
+  const [collectingPayment, setCollectingPayment] = useState(false)
+  const [collectPaymentMethod, setCollectPaymentMethod] = useState<'CASH' | 'CARD' | 'DEPOSIT' | 'CREDIT'>('CASH')
+  const [collectReceivedAmount, setCollectReceivedAmount] = useState('')
+  const [collectReferenceNumber, setCollectReferenceNumber] = useState('')
+  const [collectPaymentDocument, setCollectPaymentDocument] = useState<File | null>(null)
+  const [collectPaymentDocumentPreview, setCollectPaymentDocumentPreview] = useState<string>('')
+  const [collectCreditInstallments, setCollectCreditInstallments] = useState<CreditInstallmentDraft[]>(() => buildCreditInstallmentDrafts(0, 1))
+  const [collectCreditFrequency, setCollectCreditFrequency] = useState<CreditInstallmentFrequency>('MONTHLY')
+  const [collectCreditDownPayment, setCollectCreditDownPayment] = useState('0')
+  const [collectCreditDownPaymentMethod, setCollectCreditDownPaymentMethod] = useState<'CASH' | 'CARD' | 'DEPOSIT'>('CASH')
+  const [collectCreditDownPaymentReference, setCollectCreditDownPaymentReference] = useState('')
+  const [collectCreditDownPaymentDocument, setCollectCreditDownPaymentDocument] = useState<File | null>(null)
+  const [collectCreditDownPaymentDocumentPreview, setCollectCreditDownPaymentDocumentPreview] = useState<string>('')
+  const [collectInlineAlert, setCollectInlineAlert] = useState<{ kind: 'error' | 'warn' | 'ok'; text: string; action?: 'goCredits' } | null>(null)
+  const [collectContractSigned, setCollectContractSigned] = useState<boolean | null>(null)
+  const [collectContractChecking, setCollectContractChecking] = useState(false)
+  const [collectSaleInstallments, setCollectSaleInstallments] = useState<Array<{ id: number; due_date: string; amount: number; paid: number }>>([])
+  const [collectSaleInstallmentsLoading, setCollectSaleInstallmentsLoading] = useState(false)
   const selectedUser = users.find(u => u.id === (selectedUserId || user?.id))
   const isOwnCash = !selectedUserId || selectedUserId === user?.id
   const cashParams = isAdmin && selectedUserId && selectedUserId !== user?.id ? { userId: selectedUserId } : undefined
@@ -53,6 +211,67 @@ export default function CashRegister() {
   const creditPaymentCash = Number(creditPaymentsByMethod.CASH || 0)
   const creditPaymentDeposit = Number(creditPaymentsByMethod.DEPOSIT || 0)
   const creditPaymentCard = Number(creditPaymentsByMethod.CARD || 0)
+  const collectDownPaymentAmount = Math.max(0, Math.round(Number(collectCreditDownPayment || 0) * 100) / 100)
+  const collectCreditBaseTotal = Math.round(Math.max(0, Number(collectingSale?.total || 0) - collectDownPaymentAmount) * 100) / 100
+  const collectInstallmentsTotal = Math.round(collectCreditInstallments.reduce((sum, installment) => sum + (Number(installment.amount || 0) || 0), 0) * 100) / 100
+  const collectInstallmentsDifference = Math.round((collectCreditBaseTotal - collectInstallmentsTotal) * 100) / 100
+  const collectPreparedInstallmentsTotal = Math.round(collectSaleInstallments.reduce((sum, installment) => sum + (Number(installment.amount || 0) || 0), 0) * 100) / 100
+
+  useEffect(() => {
+    if (!collectPaymentDocument) {
+      setCollectPaymentDocumentPreview('')
+      return
+    }
+    const nextUrl = URL.createObjectURL(collectPaymentDocument)
+    setCollectPaymentDocumentPreview(nextUrl)
+    return () => {
+      URL.revokeObjectURL(nextUrl)
+    }
+  }, [collectPaymentDocument])
+
+  useEffect(() => {
+    if (!collectCreditDownPaymentDocument) {
+      setCollectCreditDownPaymentDocumentPreview('')
+      return
+    }
+    const nextUrl = URL.createObjectURL(collectCreditDownPaymentDocument)
+    setCollectCreditDownPaymentDocumentPreview(nextUrl)
+    return () => {
+      URL.revokeObjectURL(nextUrl)
+    }
+  }, [collectCreditDownPaymentDocument])
+
+  useEffect(() => {
+    if (!showCollectModal || !collectingSale) return
+    if (collectPaymentMethod !== 'CREDIT') {
+      setCollectSaleInstallments([])
+      setCollectSaleInstallmentsLoading(false)
+      setCollectContractSigned(null)
+      setCollectContractChecking(false)
+      return
+    }
+
+    let alive = true
+    ;(async () => {
+      try {
+        setCollectSaleInstallmentsLoading(true)
+        const [detail, contractMeta] = await Promise.all([
+          getSaleDetails(collectingSale.id),
+          getCreditContractBySale(collectingSale.id).catch(() => null),
+        ])
+        if (!alive) return
+        const inst = Array.isArray(detail?.installments) ? detail.installments : []
+        setCollectSaleInstallments(inst)
+        setCollectContractSigned(Boolean(contractMeta?.contract?.buyer_signed_at))
+      } finally {
+        if (alive) setCollectSaleInstallmentsLoading(false)
+      }
+    })()
+
+    return () => {
+      alive = false
+    }
+  }, [showCollectModal, collectingSale?.id, collectPaymentMethod])
 
   const handlePrintReport = () => {
     const reportSummary = summary || null
@@ -256,6 +475,7 @@ export default function CashRegister() {
       } else {
         setSummary(null)
         setMovements([])
+        setPendingSales([])
       }
     } catch (err) {
       console.error(err)
@@ -266,12 +486,14 @@ export default function CashRegister() {
 
   const fetchDetails = async () => {
     try {
-      const [sum, movs] = await Promise.all([
+      const [sum, movs, pending] = await Promise.all([
         getCashSummary(cashParams),
-        getCashMovements(cashParams)
+        getCashMovements(cashParams),
+        getPendingPaymentSales(cashParams)
       ])
       setSummary(sum)
       setMovements(movs)
+      setPendingSales(pending.items || [])
     } catch (err) {
       console.error(err)
     }
@@ -335,6 +557,179 @@ export default function CashRegister() {
       alert(err.response?.data?.error || 'Error al cerrar caja')
     } finally {
       setClosingCash(false)
+    }
+  }
+
+  const openCollectModal = (sale: {
+    id: number
+    docNo: string
+    total: number
+    createdAt: string
+    customerName: string
+    sellerName: string
+    itemsCount: number
+    pendingPaymentMethod?: 'CASH' | 'CARD' | 'DEPOSIT' | 'CREDIT' | null
+    pendingReferenceNumber?: string | null
+    pendingDownPaymentAmount?: number | null
+    pendingDownPaymentMethod?: 'CASH' | 'CARD' | 'DEPOSIT' | null
+    pendingDownPaymentReference?: string | null
+  }) => {
+    setCollectingSale(sale)
+    const plannedMethod = String(sale.pendingPaymentMethod || '').toUpperCase()
+    if (plannedMethod === 'CARD' || plannedMethod === 'DEPOSIT' || plannedMethod === 'CREDIT') setCollectPaymentMethod(plannedMethod as any)
+    else setCollectPaymentMethod('CASH')
+    setCollectReceivedAmount(String(sale.total))
+    setCollectReferenceNumber(String(sale.pendingReferenceNumber || ''))
+    setCollectPaymentDocument(null)
+    setCollectCreditFrequency('MONTHLY')
+    setCollectCreditDownPayment(String(sale.pendingDownPaymentAmount ?? 0))
+    const plannedDownPaymentMethod = String(sale.pendingDownPaymentMethod || '').toUpperCase()
+    if (plannedDownPaymentMethod === 'CARD' || plannedDownPaymentMethod === 'DEPOSIT') setCollectCreditDownPaymentMethod(plannedDownPaymentMethod as any)
+    else setCollectCreditDownPaymentMethod('CASH')
+    setCollectCreditDownPaymentReference(String(sale.pendingDownPaymentReference || ''))
+    setCollectCreditDownPaymentDocument(null)
+    setCollectCreditInstallments(buildCreditInstallmentDrafts(Number(sale.total || 0), 1, undefined, 'MONTHLY'))
+    setShowCollectModal(true)
+  }
+
+  const regenerateCollectCreditInstallments = (count = collectCreditInstallments.length || 1) => {
+    setCollectCreditInstallments(prev => buildCreditInstallmentDrafts(collectCreditBaseTotal, count, prev[0]?.dueDate, collectCreditFrequency))
+  }
+
+  const updateCollectCreditInstallment = (index: number, field: keyof CreditInstallmentDraft, value: string) => {
+    setCollectCreditInstallments(prev => prev.map((installment, installmentIndex) => (
+      installmentIndex === index
+        ? { ...installment, [field]: value }
+        : installment
+    )))
+  }
+
+  const addCollectCreditInstallment = () => {
+    setCollectCreditInstallments(prev => {
+      const stepDays = getCreditFrequencyDays(collectCreditFrequency)
+      const lastDueDate = prev[prev.length - 1]?.dueDate || addDaysToInputDate(new Date(), stepDays)
+      return [
+        ...prev,
+        {
+          amount: '0.00',
+          dueDate: addDaysToInputDate(lastDueDate, stepDays),
+        },
+      ]
+    })
+  }
+
+  const removeCollectCreditInstallment = (index: number) => {
+    setCollectCreditInstallments(prev => {
+      if (prev.length <= 1) return prev
+      return prev.filter((_, installmentIndex) => installmentIndex !== index)
+    })
+  }
+
+  const handleCollectPendingSale = async (e: FormEvent) => {
+    e.preventDefault()
+    if (!collectingSale || collectingPayment) return
+
+    const received = Number(collectReceivedAmount || 0)
+    const change = Math.max(0, received - Number(collectingSale.total || 0))
+
+    if (collectPaymentMethod === 'CASH' && received < Number(collectingSale.total || 0)) {
+      setCollectInlineAlert({ kind: 'error', text: 'El monto recibido es menor al total de la venta.' })
+      return
+    }
+    if ((collectPaymentMethod === 'CARD' || collectPaymentMethod === 'DEPOSIT') && !collectReferenceNumber.trim()) {
+      setCollectInlineAlert({ kind: 'error', text: 'Debes ingresar la referencia del pago.' })
+      return
+    }
+    if (collectPaymentMethod === 'DEPOSIT' && !collectPaymentDocument) {
+      setCollectInlineAlert({ kind: 'error', text: 'Debes adjuntar la foto del comprobante para depósito/transferencia.' })
+      return
+    }
+    if (collectPaymentMethod === 'CREDIT' && collectDownPaymentAmount >= Number(collectingSale.total || 0) - 0.01) {
+      setCollectInlineAlert({ kind: 'error', text: 'El enganche debe ser menor al total de la venta para poder generar cuotas.' })
+      return
+    }
+    if (collectPaymentMethod === 'CREDIT' && collectDownPaymentAmount > 0) {
+      if ((collectCreditDownPaymentMethod === 'CARD' || collectCreditDownPaymentMethod === 'DEPOSIT') && !collectCreditDownPaymentReference.trim()) {
+        setCollectInlineAlert({ kind: 'error', text: 'Debes ingresar la referencia del enganche.' })
+        return
+      }
+      if (collectCreditDownPaymentMethod === 'DEPOSIT' && !collectCreditDownPaymentDocument) {
+        setCollectInlineAlert({ kind: 'error', text: 'Debes adjuntar la foto del comprobante del enganche.' })
+        return
+      }
+    }
+
+    if (collectPaymentMethod === 'CREDIT') {
+      try {
+        setCollectContractChecking(true)
+        const meta = await getCreditContractBySale(collectingSale.id)
+        if (!meta?.contract?.buyer_signed_at) {
+          setCollectContractSigned(false)
+          setCollectInlineAlert({ kind: 'error', text: 'Debes firmar el contrato antes de cobrar a crédito.', action: 'goCredits' })
+          return
+        }
+        setCollectContractSigned(true)
+      } catch (err: any) {
+        setCollectInlineAlert({ kind: 'error', text: err?.response?.data?.error || 'No se pudo validar el contrato del crédito.' })
+        return
+      } finally {
+        setCollectContractChecking(false)
+      }
+    }
+
+    if (collectPaymentMethod === 'CREDIT') {
+      void __dbgClientReport({
+        point: 'collect-credit-before-validate',
+        saleId: collectingSale.id,
+        saleTotal: Number(collectingSale.total || 0),
+        downPayment: collectDownPaymentAmount,
+        creditBaseTotal: collectCreditBaseTotal,
+        frequency: collectCreditFrequency,
+        installmentsCount: collectCreditInstallments.length,
+        installmentsAmounts: collectCreditInstallments.map(it => it.amount),
+      })
+    }
+
+    if (collectPaymentMethod === 'CREDIT') {
+      if (collectSaleInstallmentsLoading) {
+        setCollectInlineAlert({ kind: 'warn', text: 'Cargando cuotas del crédito. Intenta de nuevo en un momento.' })
+        return
+      }
+      if (collectSaleInstallments.length === 0) {
+        setCollectInlineAlert({ kind: 'error', text: 'No hay cuotas preparadas para esta venta. Debe definirse el plan desde el vendedor.' })
+        return
+      }
+    }
+
+    try {
+      setCollectingPayment(true)
+      await collectPendingSalePayment(collectingSale.id, {
+        paymentMethod: collectPaymentMethod,
+        receivedAmount: collectPaymentMethod === 'CASH' ? received : 0,
+        changeAmount: collectPaymentMethod === 'CASH' ? change : 0,
+        referenceNumber: (collectPaymentMethod === 'CARD' || collectPaymentMethod === 'DEPOSIT') ? collectReferenceNumber : null,
+        downPaymentAmount: collectPaymentMethod === 'CREDIT' ? collectDownPaymentAmount : undefined,
+        downPaymentMethod: collectPaymentMethod === 'CREDIT' ? collectCreditDownPaymentMethod : undefined,
+        downPaymentReference: collectPaymentMethod === 'CREDIT' ? collectCreditDownPaymentReference : undefined,
+      },
+      collectPaymentMethod === 'DEPOSIT' ? collectPaymentDocument : null,
+      collectPaymentMethod === 'CREDIT' && collectCreditDownPaymentMethod === 'DEPOSIT'
+        ? collectCreditDownPaymentDocument
+        : null)
+      setShowCollectModal(false)
+      setCollectingSale(null)
+      await fetchDetails()
+      setCollectInlineAlert(null)
+      alert(`Venta #${collectingSale.id} cobrada correctamente.`)
+    } catch (err: any) {
+      const msg = err?.response?.data?.error || 'Error al cobrar la venta pendiente'
+      if (collectPaymentMethod === 'CREDIT' && String(msg).toLowerCase().includes('contrato')) {
+        setCollectInlineAlert({ kind: 'error', text: `${msg}.`, action: 'goCredits' })
+        return
+      }
+      setCollectInlineAlert({ kind: 'error', text: msg })
+    } finally {
+      setCollectingPayment(false)
     }
   }
 
@@ -541,6 +936,67 @@ export default function CashRegister() {
         <StatCard title="Entradas Extra" value={summary?.movementsIn} color="#3b82f6" />
         <StatCard title="Salidas / Gastos" value={summary?.movementsOut} color="#ef4444" negative />
         <StatCard title="Total Esperado" value={summary?.expectedCash} color="#eab308" highlight />
+      </div>
+
+      <div className="card" style={{ marginBottom: 20 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: isMobileViewport ? 'stretch' : 'center', flexDirection: isMobileViewport ? 'column' : 'row', gap: 10, marginBottom: 14 }}>
+          <div>
+            <h3 style={{ margin: 0 }}>Ventas Pendientes por Cobrar</h3>
+            <div style={{ color: 'var(--muted)', fontSize: '0.9rem', marginTop: 4 }}>
+              Cola enviada por vendedores para cobro en caja.
+            </div>
+          </div>
+          <div style={{ padding: '8px 12px', borderRadius: 999, background: 'rgba(37, 99, 235, 0.1)', color: '#1d4ed8', fontWeight: 700 }}>
+            {pendingSales.length} pendiente(s)
+          </div>
+        </div>
+
+        {pendingSales.length === 0 ? (
+          <div style={{ padding: 16, textAlign: 'center', color: 'var(--muted)', background: 'var(--surface)', borderRadius: 12 }}>
+            No hay ventas pendientes en esta caja.
+          </div>
+        ) : (
+          <div style={{ display: 'grid', gap: 10 }}>
+            {pendingSales.map(sale => (
+              <div
+                key={sale.id}
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: isMobileViewport ? '1fr' : 'minmax(0, 1fr) auto',
+                  gap: 12,
+                  padding: 14,
+                  borderRadius: 12,
+                  border: '1px solid var(--border)',
+                  background: 'var(--surface)'
+                }}
+              >
+                <div style={{ display: 'grid', gap: 6 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                    <strong>Venta #{sale.id}</strong>
+                    <span style={{ color: 'var(--muted)', fontSize: '0.9rem' }}>{formatDateTime(new Date(sale.createdAt))}</span>
+                  </div>
+                  <div style={{ color: 'var(--muted)', fontSize: '0.92rem' }}>
+                    Cliente: <strong style={{ color: 'var(--text)' }}>{sale.customerName}</strong> | Vendedor: <strong style={{ color: 'var(--text)' }}>{sale.sellerName}</strong>
+                  </div>
+                  <div style={{ color: 'var(--muted)', fontSize: '0.92rem' }}>
+                    Ítems: {sale.itemsCount} | Total: <strong style={{ color: 'var(--text)' }}>{formatMoney(sale.total)}</strong>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: isMobileViewport ? 'stretch' : 'center' }}>
+                  {isOwnCash ? (
+                    <button type="button" className="btn-primary" onClick={() => openCollectModal(sale)} style={{ width: isMobileViewport ? '100%' : 'auto' }}>
+                      Cobrar
+                    </button>
+                  ) : (
+                    <div style={{ padding: '10px 12px', borderRadius: 10, background: 'rgba(59, 130, 246, 0.08)', color: 'var(--muted)', fontSize: '0.9rem' }}>
+                      Solo lectura
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: isMobileViewport ? '1fr' : '1fr 1fr', gap: 20 }}>
@@ -761,6 +1217,288 @@ export default function CashRegister() {
            </form>
         </Modal>
       )}
+
+      {showCollectModal && collectingSale && (
+        <Modal mobile={isMobileViewport} width={720} onClose={() => setShowCollectModal(false)} title={`Cobrar venta #${collectingSale.id}`}>
+          <div style={{ marginBottom: 16, padding: 14, background: 'var(--bg)', borderRadius: 10 }}>
+            <div style={{ marginBottom: 6 }}><strong>Cliente:</strong> {collectingSale.customerName}</div>
+            <div style={{ marginBottom: 6 }}><strong>Vendedor:</strong> {collectingSale.sellerName}</div>
+            <div style={{ marginBottom: 6 }}><strong>Ítems:</strong> {collectingSale.itemsCount}</div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
+              <strong>Total:</strong>
+              <span style={{ fontWeight: 800, overflowX: 'auto', whiteSpace: 'nowrap', maxWidth: '65%' }}>
+                {formatMoney(collectingSale.total)}
+              </span>
+            </div>
+          </div>
+
+          <form onSubmit={handleCollectPendingSale}>
+            {collectInlineAlert && (
+              <div
+                style={{
+                  marginBottom: 14,
+                  padding: '10px 12px',
+                  borderRadius: 10,
+                  border: collectInlineAlert.kind === 'error'
+                    ? '1px solid rgba(239, 68, 68, 0.25)'
+                    : (collectInlineAlert.kind === 'warn'
+                      ? '1px solid rgba(245, 158, 11, 0.25)'
+                      : '1px solid rgba(22, 163, 74, 0.25)'),
+                  background: collectInlineAlert.kind === 'error'
+                    ? 'rgba(239, 68, 68, 0.08)'
+                    : (collectInlineAlert.kind === 'warn'
+                      ? 'rgba(245, 158, 11, 0.08)'
+                      : 'rgba(22, 163, 74, 0.08)'),
+                  color: collectInlineAlert.kind === 'error'
+                    ? '#ef4444'
+                    : (collectInlineAlert.kind === 'warn' ? '#f59e0b' : '#16a34a'),
+                  fontWeight: 800,
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  gap: 12,
+                  flexWrap: 'wrap',
+                }}
+              >
+                <div>{collectInlineAlert.text}</div>
+                {collectInlineAlert.action === 'goCredits' && collectingSale && (
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => {
+                      setShowCollectModal(false)
+                      setCollectingSale(null)
+                      navigate(`/credits?saleId=${collectingSale.id}`)
+                    }}
+                    disabled={collectingPayment}
+                    style={{ whiteSpace: 'nowrap' }}
+                  >
+                    Ir a firmar
+                  </button>
+                )}
+              </div>
+            )}
+            <div style={{ marginBottom: 15 }}>
+              <label style={{ display: 'block', marginBottom: 8 }}>Tipo de venta (definido por vendedor)</label>
+              <div style={{ padding: 10, borderRadius: 10, background: 'var(--bg)', border: '1px solid var(--border)', fontWeight: 800 }}>
+                {collectPaymentMethod === 'CREDIT'
+                  ? 'Crédito (por cuotas)'
+                  : (collectPaymentMethod === 'CARD'
+                    ? 'Contado (Tarjeta)'
+                    : (collectPaymentMethod === 'DEPOSIT'
+                      ? 'Contado (Depósito / Transferencia)'
+                      : 'Contado (Efectivo)'))}
+              </div>
+            </div>
+
+            {collectPaymentMethod === 'CASH' && (
+              <div style={{ marginBottom: 15 }}>
+                <label style={{ display: 'block', marginBottom: 8 }}>Monto recibido</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={collectReceivedAmount}
+                  onChange={e => setCollectReceivedAmount(e.target.value)}
+                  style={{ width: '100%', padding: 10, fontSize: '1.2rem' }}
+                  required
+                />
+                <div style={{ marginTop: 8, textAlign: 'right', fontWeight: 700, color: Number(collectReceivedAmount || 0) >= Number(collectingSale.total || 0) ? '#16a34a' : '#dc2626' }}>
+                  Cambio: {formatMoney(Math.max(0, Number(collectReceivedAmount || 0) - Number(collectingSale.total || 0)))}
+                </div>
+              </div>
+            )}
+
+            {(collectPaymentMethod === 'CARD' || collectPaymentMethod === 'DEPOSIT') && (
+              <div style={{ marginBottom: 15 }}>
+                <label style={{ display: 'block', marginBottom: 8 }}>Referencia</label>
+                <input
+                  type="text"
+                  value={collectReferenceNumber}
+                  onChange={e => setCollectReferenceNumber(e.target.value)}
+                  style={{ width: '100%', padding: 10 }}
+                  placeholder="Número de operación o referencia"
+                  required
+                />
+              </div>
+            )}
+
+            {collectPaymentMethod === 'DEPOSIT' && (
+              <div style={{ marginBottom: 15 }}>
+                <label style={{ display: 'block', marginBottom: 8 }}>Foto del comprobante (obligatorio)</label>
+                <input
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  onChange={(e) => setCollectPaymentDocument(e.target.files?.[0] || null)}
+                  style={{ width: '100%', padding: 10, borderRadius: 8, background: 'var(--modal)', color: 'var(--text)', border: '1px solid var(--border)' }}
+                  required
+                />
+                {collectPaymentDocumentPreview && (
+                  <div style={{ marginTop: 10 }}>
+                    <img src={collectPaymentDocumentPreview} alt="Comprobante" style={{ width: '100%', maxHeight: 240, objectFit: 'contain', borderRadius: 10, border: '1px solid var(--border)', background: 'var(--surface)' }} />
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8 }}>
+                      <button type="button" className="btn-secondary" onClick={() => setCollectPaymentDocument(null)}>
+                        Quitar foto
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {collectPaymentMethod === 'CREDIT' && (
+              <div style={{ display: 'grid', gap: 12, marginBottom: 15 }}>
+                <div style={{ padding: 12, borderRadius: 10, background: 'rgba(245, 158, 11, 0.1)', color: 'var(--text)' }}>
+                  Venta a crédito preparada por el vendedor. Caja únicamente registra el cobro del enganche.
+                </div>
+
+                <div style={{ padding: 12, borderRadius: 10, background: 'rgba(59, 130, 246, 0.12)', color: 'var(--text)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                  <div style={{ fontWeight: 800 }}>
+                    Contrato: {collectContractChecking ? 'Verificando...' : (collectContractSigned ? 'Firmado' : 'Pendiente de firma')}
+                  </div>
+                  {!collectContractSigned && (
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      onClick={() => {
+                        if (!collectingSale) return
+                        setShowCollectModal(false)
+                        setCollectingSale(null)
+                        navigate(`/credits?saleId=${collectingSale.id}`)
+                      }}
+                      style={{ whiteSpace: 'nowrap' }}
+                    >
+                      Ir a firmar
+                    </button>
+                  )}
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: isMobileViewport ? '1fr' : 'minmax(0, 1.2fr) minmax(0, 0.8fr)', gap: 10 }}>
+                  <div style={{ padding: 12, borderRadius: 10, border: '1px solid var(--border)', background: 'var(--surface)' }}>
+                    <div style={{ fontWeight: 800, marginBottom: 10 }}>Enganche</div>
+                    <div style={{ display: 'grid', gap: 10 }}>
+                      <div>
+                        <label style={{ display: 'block', marginBottom: 6, fontWeight: 700, color: 'var(--muted)' }}>Monto</label>
+                        <input
+                          type="number"
+                          value={collectCreditDownPayment}
+                          disabled
+                          style={{ width: '100%', padding: 10, borderRadius: 8, background: 'var(--bg)', color: 'var(--text)', border: '1px solid var(--border)' }}
+                        />
+                      </div>
+                      <div>
+                        <label style={{ display: 'block', marginBottom: 6, fontWeight: 700, color: 'var(--muted)' }}>Método</label>
+                        <input
+                          type="text"
+                          value={collectCreditDownPaymentMethod === 'CARD' ? 'Tarjeta' : (collectCreditDownPaymentMethod === 'DEPOSIT' ? 'Depósito / Transferencia' : 'Efectivo')}
+                          disabled
+                          style={{ width: '100%', padding: 10, borderRadius: 8, background: 'var(--bg)', color: 'var(--text)', border: '1px solid var(--border)' }}
+                        />
+                      </div>
+                      {(collectCreditDownPaymentMethod === 'CARD' || collectCreditDownPaymentMethod === 'DEPOSIT') && (
+                        <div>
+                          <label style={{ display: 'block', marginBottom: 6, fontWeight: 700, color: 'var(--muted)' }}>Referencia</label>
+                          <input
+                            type="text"
+                            value={collectCreditDownPaymentReference}
+                            onChange={e => setCollectCreditDownPaymentReference(e.target.value)}
+                            placeholder="Número de operación o referencia"
+                            required={collectDownPaymentAmount > 0}
+                            style={{ width: '100%', padding: 10, borderRadius: 8, background: 'var(--modal)', color: 'var(--text)', border: '1px solid var(--border)' }}
+                          />
+                        </div>
+                      )}
+
+                      {collectCreditDownPaymentMethod === 'DEPOSIT' && (
+                        <div>
+                          <label style={{ display: 'block', marginBottom: 6, fontWeight: 700, color: 'var(--muted)' }}>Foto del comprobante (Enganche)</label>
+                          <input
+                            type="file"
+                            accept="image/*"
+                            capture="environment"
+                            onChange={(e) => setCollectCreditDownPaymentDocument(e.target.files?.[0] || null)}
+                            style={{ width: '100%', padding: 10, borderRadius: 8, background: 'var(--modal)', color: 'var(--text)', border: '1px solid var(--border)' }}
+                            required={collectDownPaymentAmount > 0}
+                          />
+                          {collectCreditDownPaymentDocumentPreview && (
+                            <div style={{ marginTop: 10 }}>
+                              <img src={collectCreditDownPaymentDocumentPreview} alt="Comprobante" style={{ width: '100%', maxHeight: 240, objectFit: 'contain', borderRadius: 10, border: '1px solid var(--border)', background: 'var(--surface)' }} />
+                              <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8 }}>
+                                <button type="button" className="btn-secondary" onClick={() => setCollectCreditDownPaymentDocument(null)}>
+                                  Quitar foto
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div style={{ padding: 12, borderRadius: 10, border: '1px solid var(--border)', background: 'var(--surface)', alignSelf: 'start', height: 'fit-content' }}>
+                    <div style={{ fontSize: '0.8rem', color: 'var(--muted)' }}>Saldo a crédito</div>
+                    <div style={{ fontWeight: 800, marginTop: 4 }}>{formatMoney(collectCreditBaseTotal)}</div>
+                    <div style={{ marginTop: 10, fontSize: '0.8rem', color: 'var(--muted)' }}>Cuotas (pendientes)</div>
+                    <div style={{ fontWeight: 800, marginTop: 4 }}>{collectSaleInstallments.length}</div>
+                  </div>
+                </div>
+
+                <div style={{ padding: 12, borderRadius: 10, border: '1px solid var(--border)', background: 'var(--surface)' }}>
+                  <div style={{ fontWeight: 800, marginBottom: 10 }}>Cuotas</div>
+                  {collectSaleInstallmentsLoading ? (
+                    <div style={{ color: 'var(--muted)', fontWeight: 700 }}>Cargando cuotas...</div>
+                  ) : (collectSaleInstallments.length === 0 ? (
+                    <div style={{ color: '#ef4444', fontWeight: 800 }}>
+                      No hay cuotas preparadas para esta venta. Regrésala al vendedor para definir el plan.
+                    </div>
+                  ) : (
+                    <div style={{ display: 'grid', gap: 10 }}>
+                      {collectSaleInstallments.map((installment, index) => (
+                        <div key={installment.id || index} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, padding: 10, borderRadius: 10, border: '1px solid var(--border)', background: 'var(--bg)' }}>
+                          <div style={{ fontWeight: 800 }}>Cuota {index + 1}</div>
+                          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                            <div style={{ color: 'var(--muted)', fontWeight: 700 }}>Vence: {String(installment.due_date || '').slice(0, 10)}</div>
+                            <div style={{ fontWeight: 800, whiteSpace: 'nowrap' }}>{formatMoney(installment.amount)}</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: isMobileViewport ? '1fr' : 'repeat(4, minmax(0, 1fr))', gap: 10 }}>
+                  <div style={{ padding: 10, borderRadius: 8, background: 'var(--surface)', border: '1px solid var(--border)' }}>
+                    <div style={{ fontSize: '0.8rem', color: 'var(--muted)' }}>Total venta</div>
+                    <div style={{ fontWeight: 800, marginTop: 4, overflowX: 'auto', whiteSpace: 'nowrap' }}>{formatMoney(collectingSale.total)}</div>
+                  </div>
+                  <div style={{ padding: 10, borderRadius: 8, background: 'var(--surface)', border: '1px solid var(--border)' }}>
+                    <div style={{ fontSize: '0.8rem', color: 'var(--muted)' }}>Enganche</div>
+                    <div style={{ fontWeight: 800, marginTop: 4, overflowX: 'auto', whiteSpace: 'nowrap' }}>{formatMoney(collectDownPaymentAmount)}</div>
+                  </div>
+                  <div style={{ padding: 10, borderRadius: 8, background: 'var(--surface)', border: '1px solid var(--border)' }}>
+                    <div style={{ fontSize: '0.8rem', color: 'var(--muted)' }}>Total cuotas</div>
+                    <div style={{ fontWeight: 800, marginTop: 4, overflowX: 'auto', whiteSpace: 'nowrap' }}>{formatMoney(collectPreparedInstallmentsTotal)}</div>
+                  </div>
+                  <div style={{ padding: 10, borderRadius: 8, background: 'var(--surface)', border: '1px solid var(--border)' }}>
+                    <div style={{ fontSize: '0.8rem', color: 'var(--muted)' }}>Saldo a crédito</div>
+                    <div style={{ fontWeight: 800, marginTop: 4, overflowX: 'auto', whiteSpace: 'nowrap' }}>{formatMoney(collectCreditBaseTotal)}</div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', flexDirection: isMobileViewport ? 'column' : 'row', gap: 10 }}>
+              <button type="button" onClick={() => setShowCollectModal(false)} className="btn-secondary" style={{ width: isMobileViewport ? '100%' : 'auto' }} disabled={collectingPayment}>
+                Cancelar
+              </button>
+              <button type="submit" className="btn-primary" style={{ width: isMobileViewport ? '100%' : 'auto' }} disabled={collectingPayment}>
+                {collectingPayment ? 'Cobrando...' : 'Confirmar cobro'}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
     </div>
   )
 }
@@ -776,10 +1514,10 @@ function StatCard({ title, value, color, negative, highlight }: any) {
     )
 }
 
-function Modal({ children, onClose, title, mobile }: any) {
+function Modal({ children, onClose, title, mobile, width }: any) {
     return (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', justifyContent: 'center', alignItems: mobile ? 'flex-end' : 'center', zIndex: 1000, padding: mobile ? 0 : 16 }}>
-            <div style={{ background: 'var(--modal)', padding: mobile ? 16 : 20, borderRadius: mobile ? '18px 18px 0 0' : 12, width: mobile ? '100%' : 400, maxWidth: mobile ? '100%' : '90%', maxHeight: mobile ? '88vh' : undefined, overflowY: mobile ? 'auto' : 'visible', boxShadow: '0 4px 20px rgba(0,0,0,0.2)' }}>
+            <div style={{ background: 'var(--modal)', padding: mobile ? 14 : 20, borderRadius: mobile ? '18px 18px 0 0' : 12, width: mobile ? '100%' : (width ?? 520), maxWidth: mobile ? '100%' : '98%', maxHeight: mobile ? '88vh' : '90vh', overflowY: 'auto', overflowX: 'auto', boxShadow: '0 4px 20px rgba(0,0,0,0.2)' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 15 }}>
                     <h3 style={{ margin: 0 }}>{title}</h3>
                     <button type="button" onClick={onClose} style={{ background: 'none', border: 'none', fontSize: '1.2rem', cursor: 'pointer' }}>×</button>
@@ -794,7 +1532,8 @@ function translateMethod(method: string) {
     const map: any = {
         'CASH': 'Efectivo',
         'CARD': 'Tarjeta',
-        'DEPOSIT': 'Depósito',
+        'DEPOSIT': 'Depósito/Transferencia',
+        'TRANSFER': 'Depósito/Transferencia',
         'CREDIT': 'Crédito'
     }
     return map[method] || method

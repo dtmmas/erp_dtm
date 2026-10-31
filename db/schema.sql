@@ -113,6 +113,15 @@ CREATE TABLE IF NOT EXISTS products (
   FOREIGN KEY (supplier_id) REFERENCES suppliers(id)
 );
 
+CREATE TABLE IF NOT EXISTS product_images (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  product_id INT NOT NULL,
+  image_url VARCHAR(255) NOT NULL,
+  sort_order INT NOT NULL DEFAULT 0,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+);
+
 -- Asegurar columna brand_id si products ya existía sin ella
 SET @col_exists := (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'products' AND COLUMN_NAME = 'brand_id');
 SET @stmt := IF(@col_exists = 0, 'ALTER TABLE products ADD COLUMN brand_id INT NULL', 'SELECT 1');
@@ -309,6 +318,12 @@ CREATE TABLE IF NOT EXISTS credit_payments (
   id INT AUTO_INCREMENT PRIMARY KEY,
   installment_id INT NOT NULL,
   amount DECIMAL(12,2) NOT NULL,
+  payment_type VARCHAR(20) NULL,
+  payment_method VARCHAR(20) NULL,
+  reference VARCHAR(160) NULL,
+  document_url VARCHAR(255) NULL,
+  received_by VARCHAR(160) NULL,
+  user_id INT NULL,
   paid_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (installment_id) REFERENCES installments(id)
 );

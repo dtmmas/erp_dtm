@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
 
 interface Permission {
@@ -14,6 +14,44 @@ interface Role {
   permissions: string[]
 }
 
+const GROUP_LABELS: Record<string, string> = {
+  users: 'Usuarios',
+  roles: 'Roles',
+  products: 'Productos',
+  categories: 'Categorías',
+  brands: 'Marcas',
+  suppliers: 'Proveedores',
+  departments: 'Departamentos',
+  shelves: 'Ubicaciones',
+  warehouses: 'Almacenes',
+  units: 'Unidades',
+  customers: 'Clientes',
+  sales: 'Ventas',
+  credits: 'Créditos',
+  config: 'Configuración',
+  reports: 'Reportes',
+  purchases: 'Compras',
+  logs: 'Logs',
+  inventory: 'Inventario',
+  transfers: 'Traslados',
+  pos: 'POS',
+  cash: 'Caja',
+}
+
+const ACTION_ORDER = ['read', 'write', 'create', 'cancel', 'open', 'close', 'movements', 'access', 'change_price', 'manual_price']
+
+function getPermissionGroup(code: string) {
+  const [group] = String(code || '').split(':')
+  return group || 'other'
+}
+
+function getPermissionActionWeight(code: string) {
+  const parts = String(code || '').split(':').slice(1)
+  const normalized = parts.join(':')
+  const index = ACTION_ORDER.indexOf(normalized)
+  return index >= 0 ? index : ACTION_ORDER.length
+}
+
 export default function Roles() {
   const [roles, setRoles] = useState<Role[]>([])
   const [permissions, setPermissions] = useState<Permission[]>([])
@@ -26,6 +64,32 @@ export default function Roles() {
     description: '',
     permissions: [] as string[]
   })
+
+  const groupedPermissions = useMemo(() => {
+    const groups = new Map<string, Permission[]>()
+
+    for (const permission of permissions) {
+      const groupKey = getPermissionGroup(permission.code)
+      if (!groups.has(groupKey)) groups.set(groupKey, [])
+      groups.get(groupKey)?.push(permission)
+    }
+
+    return Array.from(groups.entries())
+      .sort(([groupA], [groupB]) => {
+        const labelA = GROUP_LABELS[groupA] || groupA
+        const labelB = GROUP_LABELS[groupB] || groupB
+        return labelA.localeCompare(labelB, 'es')
+      })
+      .map(([groupKey, groupPermissions]) => ({
+        key: groupKey,
+        label: GROUP_LABELS[groupKey] || groupKey.toUpperCase(),
+        permissions: [...groupPermissions].sort((a, b) => {
+          const actionDiff = getPermissionActionWeight(a.code) - getPermissionActionWeight(b.code)
+          if (actionDiff !== 0) return actionDiff
+          return a.description.localeCompare(b.description, 'es')
+        }),
+      }))
+  }, [permissions])
 
   useEffect(() => {
     fetchRoles()
@@ -91,6 +155,15 @@ export default function Roles() {
         ? prev.permissions.filter(p => p !== code)
         : [...prev.permissions, code]
       return { ...prev, permissions: perms }
+    })
+  }
+
+  const setGroupPermissions = (codes: string[], enabled: boolean) => {
+    setFormData(prev => {
+      if (enabled) {
+        return { ...prev, permissions: Array.from(new Set([...prev.permissions, ...codes])) }
+      }
+      return { ...prev, permissions: prev.permissions.filter(code => !codes.includes(code)) }
     })
   }
   
@@ -191,9 +264,6 @@ export default function Roles() {
                 <div>
                   <label>Permisos</label>
                   <div style={{ 
-                    display: 'grid', 
-                    gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))', 
-                    gap: '0.5rem', 
                     border: '1px solid var(--border)', 
                     padding: '1rem', 
                     borderRadius: '8px', 
@@ -201,20 +271,49 @@ export default function Roles() {
                     overflowY: 'auto',
                     background: 'var(--bg)'
                   }}>
-                    {permissions.map(perm => (
-                      <label key={perm.id} style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', cursor: 'pointer', padding: '4px', borderRadius: '4px' }}>
-                        <input
-                          type="checkbox"
-                          checked={formData.permissions.includes(perm.code)}
-                          onChange={() => togglePermission(perm.code)}
-                          style={{ marginTop: '4px', width: 'auto' }}
-                        />
-                        <div>
-                          <div style={{ fontWeight: 500, fontSize: '0.9rem' }}>{perm.description}</div>
-                          <div style={{ fontSize: '0.75rem', color: 'var(--muted)' }}>{perm.code}</div>
-                        </div>
-                      </label>
-                    ))}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                      {groupedPermissions.map(group => (
+                        <section key={group.key} style={{ border: '1px solid var(--border)', borderRadius: 10, background: 'var(--modal)', padding: 12 }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 10, flexWrap: 'wrap' }}>
+                            <div style={{ fontWeight: 700, color: 'var(--text)' }}>
+                              {group.label}
+                            </div>
+                            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                              <button
+                                type="button"
+                                onClick={() => setGroupPermissions(group.permissions.map(permission => permission.code), true)}
+                                style={{ background: 'transparent', border: '1px solid var(--border)', borderRadius: 8, padding: '6px 10px', color: 'var(--text)', cursor: 'pointer', fontSize: 12, fontWeight: 600 }}
+                              >
+                                Seleccionar todo
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setGroupPermissions(group.permissions.map(permission => permission.code), false)}
+                                style={{ background: 'transparent', border: '1px solid var(--border)', borderRadius: 8, padding: '6px 10px', color: 'var(--muted)', cursor: 'pointer', fontSize: 12, fontWeight: 600 }}
+                              >
+                                Quitar todo
+                              </button>
+                            </div>
+                          </div>
+                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))', gap: '0.5rem' }}>
+                            {group.permissions.map(perm => (
+                              <label key={perm.id} style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', cursor: 'pointer', padding: '4px', borderRadius: '4px' }}>
+                                <input
+                                  type="checkbox"
+                                  checked={formData.permissions.includes(perm.code)}
+                                  onChange={() => togglePermission(perm.code)}
+                                  style={{ marginTop: '4px', width: 'auto' }}
+                                />
+                                <div>
+                                  <div style={{ fontWeight: 500, fontSize: '0.9rem' }}>{perm.description}</div>
+                                  <div style={{ fontSize: '0.75rem', color: 'var(--muted)' }}>{perm.code}</div>
+                                </div>
+                              </label>
+                            ))}
+                          </div>
+                        </section>
+                      ))}
+                    </div>
                   </div>
                 </div>
               </div>

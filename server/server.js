@@ -19,10 +19,12 @@ import purchasesRouter from './routes/purchases.js'
 import inventoryRouter from './routes/inventory.js'
 import customersRouter from './routes/customers.js'
 import creditsRouter from './routes/credits.js'
+import creditContractsRouter from './routes/credit_contracts.js'
 import rolesRouter from './routes/roles.js'
 import usersRouter from './routes/users.js'
 import transfersRouter from './routes/transfers.js'
 import cashRegistersRouter from './routes/cash_registers.js'
+import shipmentsRouter from './routes/shipments.js'
 import { envPath, uploadsDir } from './paths.js'
 import { auditTrackedInventoryConsistency, logTrackedInventoryAudit } from './services/tracked_inventory_audit.js'
 
@@ -72,8 +74,10 @@ app.use('/api/purchases', purchasesRouter)
 app.use('/api/inventory', inventoryRouter)
 app.use('/api/customers', customersRouter)
 app.use('/api/credits', creditsRouter)
+app.use('/api/credit-contracts', creditContractsRouter)
 app.use('/api/transfers', transfersRouter)
 app.use('/api/cash-registers', cashRegistersRouter)
+app.use('/api/shipments', shipmentsRouter)
 
 // Start server only if DB connects
 ;(async () => {

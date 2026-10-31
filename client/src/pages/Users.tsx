@@ -19,6 +19,7 @@ interface User {
   role_id: number
   role_name: string
   can_sell?: number
+  is_driver?: number
   warehouse_id?: number | null
   warehouse_name?: string | null
   active: number
@@ -39,6 +40,7 @@ export default function Users() {
     role_id: 0,
     warehouse_id: 0,
     can_sell: true,
+    is_driver: false,
     active: true
   })
 
@@ -107,6 +109,7 @@ export default function Users() {
         role_id: user.role_id,
         warehouse_id: Number(user.warehouse_id || 0),
         can_sell: Number(user.can_sell ?? 1) === 1,
+        is_driver: Number(user.is_driver ?? 0) === 1,
         active: user.active === 1
       })
     } else {
@@ -118,6 +121,7 @@ export default function Users() {
         role_id: roles[0]?.id || 0,
         warehouse_id: warehouses[0]?.id || 0,
         can_sell: true,
+        is_driver: false,
         active: true
       })
     }
@@ -152,6 +156,7 @@ export default function Users() {
               <th style={{ textAlign: 'left', padding: 8 }}>Rol</th>
               <th style={{ textAlign: 'left', padding: 8 }}>Tienda</th>
               <th style={{ textAlign: 'left', padding: 8 }}>POS</th>
+              <th style={{ textAlign: 'left', padding: 8 }}>Chofer</th>
               <th style={{ textAlign: 'left', padding: 8 }}>Estado</th>
               <th style={{ textAlign: 'left', padding: 8 }}>Acciones</th>
             </tr>
@@ -176,6 +181,19 @@ export default function Users() {
                     border: Number(user.can_sell ?? 1) === 1 ? '1px solid #34D399' : '1px solid #FCD34D'
                   }}>
                     {Number(user.can_sell ?? 1) === 1 ? 'Habilitado' : 'Bloqueado'}
+                  </span>
+                </td>
+                <td style={{ padding: 8 }}>
+                  <span style={{
+                    padding: '2px 8px',
+                    borderRadius: 10,
+                    fontSize: 11,
+                    background: Number(user.is_driver ?? 0) === 1 ? '#EFF6FF' : '#F3F4F6',
+                    color: Number(user.is_driver ?? 0) === 1 ? '#1D4ED8' : '#374151',
+                    fontWeight: 700,
+                    border: Number(user.is_driver ?? 0) === 1 ? '1px solid #93C5FD' : '1px solid #D1D5DB'
+                  }}>
+                    {Number(user.is_driver ?? 0) === 1 ? 'Sí' : 'No'}
                   </span>
                 </td>
                 <td style={{ padding: 8 }}>
@@ -284,6 +302,20 @@ export default function Users() {
                   </label>
                   <div style={{ color: 'var(--muted)', fontSize: 12, marginTop: 4 }}>
                     Recomendado para administradores con tienda asignada o usuarios operativos de ventas.
+                  </div>
+                </div>
+                <div style={{ marginBottom: 12 }}>
+                  <label className="flex items-center space-x-2" style={{ flexDirection: 'row', gap: '8px', cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={formData.is_driver}
+                      onChange={e => setFormData({ ...formData, is_driver: e.target.checked })}
+                      style={{ width: 'auto' }}
+                    />
+                    <span className="text-sm font-medium">Es chofer (Entregas)</span>
+                  </label>
+                  <div style={{ color: 'var(--muted)', fontSize: 12, marginTop: 4 }}>
+                    Solo usuarios marcados como chofer podrán asignarse a despachos.
                   </div>
                 </div>
                 {editingUser && (

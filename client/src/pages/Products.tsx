@@ -1,6 +1,6 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useAuthStore } from '../store/auth'
-import { api, getProducts, getCategories, getBrands, getSuppliers, createProduct, updateProduct, deleteProduct, getProductDetails, getProductCostHistory, getUnits, createBrand, createUnit, getDepartments, createDepartment, getWarehouses, getProductWarehouseStock, transferProductWarehouseStock, getShelves } from '../api'
+import { api, getProducts, getCategories, getBrands, getSuppliers, createProduct, updateProduct, deleteProduct, getProductDetails, getProductCostHistory, getUnits, createBrand, createUnit, getDepartments, createDepartment, getWarehouses, getProductWarehouseStock, transferProductWarehouseStock, getShelves, replaceProductImage, deleteProductImage, addProductImages, reorderProductImages } from '../api'
 import { useConfigStore } from '../store/config'
 import { formatMoney } from '../utils/currency'
 import { resolveUnitName, buildUnitNameMap } from '../utils/units'
@@ -18,6 +18,12 @@ interface Category {
 interface Brand { id: number; name: string }
 interface Supplier { id: number; name: string }
 interface Department { id: number; name: string }
+
+interface ProductImageItem {
+  id: number
+  imageUrl: string
+  sortOrder: number
+}
 
 interface Product {
   id: number
@@ -40,6 +46,8 @@ interface Product {
   brandId?: number
   supplierId?: number
   imageUrl?: string
+  images?: string[]
+  imageItems?: ProductImageItem[]
   productType?: string
   altName?: string
   genericName?: string
@@ -160,14 +168,19 @@ export default function Products() {
     price2: string
     price3: string
     cost: string
+    initialStock: string
     minStock: string
     unit: string
     description: string
     categoryId: string
     brandId: string
     supplierId: string
-    imageFile?: File | null
-    imagePreview?: string | null
+    imageFiles: File[]
+    imagePreviews: string[]
+    imageUrls: string[]
+    imageItems: ProductImageItem[]
+    initialWarehouseId: string
+    initialShelfId: string
     productType: string
     altName: string
     genericName: string
@@ -176,12 +189,41 @@ export default function Products() {
     imeis: string[]
     serials: string[]
   }>({
-    name: '', sku: '', productCode: '', price: '', price2: '', price3: '', cost: '', minStock: '', unit: '', description: '', categoryId: '', brandId: '', supplierId: '', imageFile: null, imagePreview: null,
-    productType: 'GENERAL', altName: '', genericName: '', shelfLocation: '', batches: [], imeis: [], serials: []
+    name: '',
+    sku: '',
+    productCode: '',
+    price: '',
+    price2: '',
+    price3: '',
+    cost: '',
+    initialStock: '',
+    minStock: '',
+    unit: '',
+    description: '',
+    categoryId: '',
+    brandId: '',
+    supplierId: '',
+    imageFiles: [],
+    imagePreviews: [],
+    imageUrls: [],
+    imageItems: [],
+    initialWarehouseId: '',
+    initialShelfId: '',
+    productType: 'GENERAL',
+    altName: '',
+    genericName: '',
+    shelfLocation: '',
+    batches: [],
+    imeis: [],
+    serials: []
   })
 
   const [imeiInput, setImeiInput] = useState('')
   const [serialInput, setSerialInput] = useState('')
+  const [selectedExistingImageId, setSelectedExistingImageId] = useState<number | null>(null)
+  const [selectedNewImageIndex, setSelectedNewImageIndex] = useState<number | null>(null)
+  const replaceExistingImageRef = useRef<HTMLInputElement | null>(null)
+  const dragExistingImageId = useRef<number | null>(null)
   
   // Helper: comprobar si un estante pertenece al almacén seleccionado
   function shelfMatchesWarehouse(shelf: { warehouseId?: number | null; warehouseIds?: number[] }, warehouseId: number) {
@@ -797,9 +839,36 @@ export default function Products() {
     const unitCode = units.some(u => u.code === def) ? def : ''
 
     setFormState({
-      name: '', sku: '', productCode: '', price: '', price2: '', price3: '', cost: '', minStock: '', unit: unitCode, description: '', categoryId: '', brandId: '', supplierId: '', imageFile: null, imagePreview: null,
-      productType: productType, altName: '', genericName: '', shelfLocation: '', batches: [], imeis: [], serials: []
+      name: '',
+      sku: '',
+      productCode: '',
+      price: '',
+      price2: '',
+      price3: '',
+      cost: '',
+      initialStock: '',
+      minStock: '',
+      unit: unitCode,
+      description: '',
+      categoryId: '',
+      brandId: '',
+      supplierId: '',
+      imageFiles: [],
+      imagePreviews: [],
+      imageUrls: [],
+      imageItems: [],
+      initialWarehouseId: '',
+      initialShelfId: '',
+      productType: productType,
+      altName: '',
+      genericName: '',
+      shelfLocation: '',
+      batches: [],
+      imeis: [],
+      serials: []
     })
+    setSelectedExistingImageId(null)
+    setSelectedNewImageIndex(null)
   }
 
   async function startEdit(p: Product) {
@@ -830,14 +899,19 @@ export default function Products() {
         price2: String(details.price2 ?? ''),
         price3: String(details.price3 ?? ''),
         cost: String(details.cost ?? ''),
+        initialStock: String(details.initialStock ?? ''),
         minStock: String(details.minStock ?? ''),
         unit: details.unit || '',
         description: details.description || '',
         categoryId: details.categoryId ? String(details.categoryId) : '',
         brandId: details.brandId ? String(details.brandId) : '',
         supplierId: details.supplierId ? String(details.supplierId) : '',
-        imageFile: null,
-        imagePreview: details.imageUrl || null,
+        imageFiles: [],
+        imagePreviews: [],
+        imageUrls: Array.isArray(details.images) && details.images.length > 0
+          ? details.images
+          : (details.imageUrl ? [details.imageUrl] : []),
+        imageItems: Array.isArray(details.imageItems) ? details.imageItems : [],
         initialWarehouseId: '',
         initialShelfId: '',
         productType: (details.productType || 'GENERAL').toUpperCase(),
@@ -848,6 +922,9 @@ export default function Products() {
         imeis: imeisFs,
         serials: serialsFs,
       })
+      const firstId = Array.isArray(details.imageItems) && details.imageItems.length > 0 ? Number(details.imageItems[0]?.id || 0) : null
+      setSelectedExistingImageId(firstId || null)
+      setSelectedNewImageIndex(null)
       {
         const catSel = details.categoryId ? categories.find(c => c.id === details.categoryId) : undefined
         setFormParentId(catSel?.parentId ?? null)
@@ -865,14 +942,19 @@ export default function Products() {
         price2: String(p.price2 ?? ''),
         price3: String(p.price3 ?? ''),
         cost: String(p.cost ?? ''),
+        initialStock: String(p.initialStock ?? ''),
         minStock: String(p.minStock ?? ''),
         unit: p.unit || '',
         description: p.description || '',
         categoryId: p.categoryId ? String(p.categoryId) : '',
         brandId: p.brandId ? String(p.brandId) : '',
         supplierId: p.supplierId ? String(p.supplierId) : '',
-        imageFile: null,
-        imagePreview: p.imageUrl || null,
+        imageFiles: [],
+        imagePreviews: [],
+        imageUrls: Array.isArray(p.images) && p.images.length > 0
+          ? p.images
+          : (p.imageUrl ? [p.imageUrl] : []),
+        imageItems: Array.isArray(p.imageItems) ? p.imageItems : [],
         initialWarehouseId: '',
         initialShelfId: '',
         productType: (p.productType || 'GENERAL').toUpperCase(),
@@ -881,6 +963,9 @@ export default function Products() {
         shelfLocation: p.shelfLocation || '',
         batches: [], imeis: [], serials: []
       })
+      const firstId = Array.isArray(p.imageItems) && p.imageItems.length > 0 ? Number(p.imageItems[0]?.id || 0) : null
+      setSelectedExistingImageId(firstId || null)
+      setSelectedNewImageIndex(null)
     } finally {
       setLoading(false)
     }
@@ -1000,18 +1085,158 @@ export default function Products() {
     setFormState(prev => ({ ...prev, [key]: value }))
   }
 
-  function onImageChange(file: File | null) {
-    if (!file) {
-      onFormChange('imageFile', null)
-      onFormChange('imagePreview', null)
+  function readImagePreview(file: File) {
+    return new Promise<string>((resolve) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(String(reader.result || ''))
+      reader.readAsDataURL(file)
+    })
+  }
+
+  async function onImagesReplace(files: File[]) {
+    const safeFiles = Array.isArray(files) ? files.filter(Boolean) : []
+    if (safeFiles.length === 0) {
+      setFormState(prev => ({ ...prev, imageFiles: [], imagePreviews: [] }))
       return
     }
-    const reader = new FileReader()
-    reader.onload = () => {
-      onFormChange('imageFile', file)
-      onFormChange('imagePreview', String(reader.result))
+    const previews = await Promise.all(safeFiles.map(readImagePreview))
+    setFormState(prev => ({ ...prev, imageFiles: safeFiles, imagePreviews: previews }))
+  }
+
+  async function onAddImages(files: File[]) {
+    const safeFiles = Array.isArray(files) ? files.filter(Boolean) : []
+    if (safeFiles.length === 0) return
+    const previews = await Promise.all(safeFiles.map(readImagePreview))
+    setFormState(prev => ({
+      ...prev,
+      imageFiles: [...prev.imageFiles, ...safeFiles],
+      imagePreviews: [...prev.imagePreviews, ...previews],
+    }))
+  }
+
+  async function onAddImage(file: File | null) {
+    if (!file) return
+    const preview = await readImagePreview(file)
+    setFormState(prev => ({
+      ...prev,
+      imageFiles: [...prev.imageFiles, file],
+      imagePreviews: [...prev.imagePreviews, preview],
+    }))
+  }
+
+  function removeNewImageAt(index: number) {
+    setFormState(prev => ({
+      ...prev,
+      imageFiles: prev.imageFiles.filter((_, i) => i !== index),
+      imagePreviews: prev.imagePreviews.filter((_, i) => i !== index),
+    }))
+    setSelectedNewImageIndex(prev => (prev === index ? null : prev))
+  }
+
+  async function uploadPendingNewImagesNow() {
+    if (!editTarget?.id) return
+    if (!Array.isArray(formState.imageFiles) || formState.imageFiles.length === 0) return
+    try {
+      setLoading(true)
+      const payload = await addProductImages(editTarget.id, formState.imageFiles)
+      const nextImageItems = Array.isArray(payload?.imageItems) ? payload.imageItems : []
+      const nextImages = Array.isArray(payload?.images) ? payload.images : []
+      setFormState(prev => ({
+        ...prev,
+        imageFiles: [],
+        imagePreviews: [],
+        imageUrls: nextImages.length > 0 ? nextImages : prev.imageUrls,
+        imageItems: nextImageItems.length > 0 ? nextImageItems : prev.imageItems,
+      }))
+      setSelectedNewImageIndex(null)
+      setSelectedExistingImageId(nextImageItems?.[0]?.id ?? null)
+      setProducts(prev => prev.map(p => (p.id === editTarget.id ? { ...p, imageUrl: payload?.imageUrl, images: nextImages, imageItems: nextImageItems } : p)))
+    } catch (err: any) {
+      const msg = err?.response?.data?.error || err?.message || 'Error subiendo imágenes'
+      alert(msg)
+    } finally {
+      setLoading(false)
     }
-    reader.readAsDataURL(file)
+  }
+
+  async function replaceSelectedExistingImage(file: File) {
+    if (!editTarget?.id) return
+    if (!selectedExistingImageId) return
+    try {
+      setLoading(true)
+      const payload = await replaceProductImage(editTarget.id, selectedExistingImageId, file)
+      const nextImageItems = Array.isArray(payload?.imageItems) ? payload.imageItems : []
+      const nextImages = Array.isArray(payload?.images) ? payload.images : []
+      setFormState(prev => ({
+        ...prev,
+        imageUrls: nextImages.length > 0 ? nextImages : prev.imageUrls,
+        imageItems: nextImageItems.length > 0 ? nextImageItems : prev.imageItems,
+      }))
+      setProducts(prev => prev.map(p => (p.id === editTarget.id ? { ...p, imageUrl: payload?.imageUrl, images: nextImages, imageItems: nextImageItems } : p)))
+    } catch (err: any) {
+      const msg = err?.response?.data?.error || err?.message || 'Error reemplazando imagen'
+      alert(msg)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function deleteSelectedExistingImage() {
+    if (!editTarget?.id) return
+    if (!selectedExistingImageId) return
+    const confirmed = confirm('¿Eliminar esta imagen del producto?')
+    if (!confirmed) return
+    try {
+      setLoading(true)
+      const payload = await deleteProductImage(editTarget.id, selectedExistingImageId)
+      const nextImageItems = Array.isArray(payload?.imageItems) ? payload.imageItems : []
+      const nextImages = Array.isArray(payload?.images) ? payload.images : []
+      setFormState(prev => ({
+        ...prev,
+        imageUrls: nextImages,
+        imageItems: nextImageItems,
+      }))
+      setSelectedExistingImageId(nextImageItems?.[0]?.id ?? null)
+      setProducts(prev => prev.map(p => (p.id === editTarget.id ? { ...p, imageUrl: payload?.imageUrl, images: nextImages, imageItems: nextImageItems } : p)))
+    } catch (err: any) {
+      const msg = err?.response?.data?.error || err?.message || 'Error eliminando imagen'
+      alert(msg)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function applyReorder(nextOrderIds: number[]) {
+    if (!editTarget?.id) return
+    const safe = Array.isArray(nextOrderIds)
+      ? nextOrderIds.map(x => Number(x)).filter(x => x > 0 && !Number.isNaN(x))
+      : []
+    if (safe.length === 0) return
+    try {
+      setLoading(true)
+      const payload = await reorderProductImages(editTarget.id, safe)
+      const nextImageItems = Array.isArray(payload?.imageItems) ? payload.imageItems : []
+      const nextImages = Array.isArray(payload?.images) ? payload.images : []
+      setFormState(prev => ({
+        ...prev,
+        imageUrls: nextImages,
+        imageItems: nextImageItems,
+      }))
+      setSelectedExistingImageId(nextImageItems?.[0]?.id ?? null)
+      setProducts(prev => prev.map(p => (p.id === editTarget.id ? { ...p, imageUrl: payload?.imageUrl, images: nextImages, imageItems: nextImageItems } : p)))
+    } catch (err: any) {
+      const msg = err?.response?.data?.error || err?.message || 'Error reordenando imágenes'
+      alert(msg)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function makeSelectedImagePrimary() {
+    if (!selectedExistingImageId) return
+    const ids = formState.imageItems.map(item => item.id)
+    const next = [selectedExistingImageId, ...ids.filter(id => id !== selectedExistingImageId)]
+    await applyReorder(next)
   }
 
   async function saveCreate() {
@@ -1062,7 +1287,12 @@ export default function Products() {
       appendIfPresent('minStock', formState.minStock)
       appendIfPresent('unit', formState.unit)
       appendIfPresent('description', formState.description)
-      if (formState.imageFile) fd.append('image', formState.imageFile)
+      if (Array.isArray(formState.imageFiles) && formState.imageFiles.length > 0) {
+        fd.append('image', formState.imageFiles[0])
+        for (const file of formState.imageFiles) {
+          fd.append('images', file)
+        }
+      }
   
       // Campos de tipo
       fd.append('productType', String(formState.productType || '').trim().toUpperCase())
@@ -1161,7 +1391,12 @@ export default function Products() {
       appendIfPresent('minStock', formState.minStock)
       appendIfPresent('unit', formState.unit)
       appendIfPresent('description', formState.description)
-      if (formState.imageFile) fd.append('image', formState.imageFile)
+      if (Array.isArray(formState.imageFiles) && formState.imageFiles.length > 0) {
+        fd.append('image', formState.imageFiles[0])
+        for (const file of formState.imageFiles) {
+          fd.append('images', file)
+        }
+      }
   
       fd.append('productType', String(formState.productType || '').trim().toUpperCase())
       appendIfPresent('altName', formState.altName)
@@ -1826,28 +2061,196 @@ export default function Products() {
             <div className="responsive-two-col">
               <div style={{ background: 'linear-gradient(180deg, var(--bg), var(--surface))', border: '1px solid var(--border)', borderRadius: 22, padding: 14, display: 'flex', flexDirection: 'column', gap: 12 }}>
                 <div style={{ width: '100%', height: 240, borderRadius: 18, overflow: 'hidden', border: '1px solid var(--border)', background: 'var(--bg)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  {formState.imagePreview ? (
-                    <img src={formState.imagePreview} alt="Preview" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                  ) : (
-                    <div style={{ color: 'var(--muted)', fontSize: 13, textAlign: 'center', padding: 16 }}>
-                      Sin imagen seleccionada
-                    </div>
-                  )}
+                  {(() => {
+                    const src =
+                      (selectedNewImageIndex !== null ? formState.imagePreviews[selectedNewImageIndex] : null)
+                      || (selectedExistingImageId
+                        ? (formState.imageItems.find(item => item.id === selectedExistingImageId)?.imageUrl || null)
+                        : null)
+                      || formState.imagePreviews[0]
+                      || formState.imageUrls[0]
+                      || null
+
+                    if (!src) {
+                      return (
+                        <div style={{ color: 'var(--muted)', fontSize: 13, textAlign: 'center', padding: 16 }}>
+                          Sin imagen seleccionada
+                        </div>
+                      )
+                    }
+
+                    return <img src={src} alt="Preview" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                  })()}
                 </div>
+                {(formState.imageItems.length + formState.imageUrls.length + formState.imagePreviews.length) > 0 && (
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    {formState.imageItems.map((item) => (
+                      <button
+                        key={`existing-${item.id}`}
+                        type="button"
+                        draggable
+                        onClick={() => { setSelectedExistingImageId(item.id); setSelectedNewImageIndex(null) }}
+                        onDragStart={(e) => {
+                          dragExistingImageId.current = item.id
+                          try { e.dataTransfer.setData('text/plain', String(item.id)) } catch {}
+                          try { e.dataTransfer.effectAllowed = 'move' } catch {}
+                        }}
+                        onDragOver={(e) => {
+                          e.preventDefault()
+                          try { e.dataTransfer.dropEffect = 'move' } catch {}
+                        }}
+                        onDrop={(e) => {
+                          e.preventDefault()
+                          const raw = (() => {
+                            try { return e.dataTransfer.getData('text/plain') } catch { return '' }
+                          })()
+                          const fromId = Number(raw || dragExistingImageId.current || 0)
+                          const toId = item.id
+                          if (!fromId || fromId === toId) return
+                          const ids = formState.imageItems.map(it => it.id)
+                          const fromIdx = ids.indexOf(fromId)
+                          const toIdx = ids.indexOf(toId)
+                          if (fromIdx < 0 || toIdx < 0) return
+                          const next = [...ids]
+                          next.splice(fromIdx, 1)
+                          next.splice(toIdx, 0, fromId)
+                          void applyReorder(next)
+                        }}
+                        style={{
+                          width: 48,
+                          height: 48,
+                          padding: 0,
+                          borderRadius: 10,
+                          border: `2px solid ${selectedExistingImageId === item.id && selectedNewImageIndex === null ? 'var(--accent)' : 'var(--border)'}`,
+                          background: 'var(--bg)',
+                          overflow: 'hidden',
+                          cursor: 'pointer',
+                        }}
+                        aria-label="Seleccionar imagen"
+                        title="Seleccionar"
+                      >
+                        <img src={item.imageUrl} alt="Imagen guardada" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                      </button>
+                    ))}
+                    {formState.imageItems.length === 0 && formState.imageUrls.map((src, idx) => (
+                      <button
+                        key={`existing-url-${idx}`}
+                        type="button"
+                        onClick={() => { setSelectedExistingImageId(null); setSelectedNewImageIndex(null) }}
+                        style={{
+                          width: 48,
+                          height: 48,
+                          padding: 0,
+                          borderRadius: 10,
+                          border: `2px solid ${selectedNewImageIndex === null && idx === 0 ? 'var(--accent)' : 'var(--border)'}`,
+                          background: 'var(--bg)',
+                          overflow: 'hidden',
+                          cursor: 'pointer',
+                        }}
+                        aria-label="Imagen guardada"
+                      >
+                        <img src={src} alt="Imagen guardada" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                      </button>
+                    ))}
+                    {formState.imagePreviews.map((src, idx) => (
+                      <button
+                        key={`new-${idx}`}
+                        type="button"
+                        onClick={() => { setSelectedNewImageIndex(idx); setSelectedExistingImageId(null) }}
+                        style={{
+                          width: 48,
+                          height: 48,
+                          padding: 0,
+                          borderRadius: 10,
+                          border: `2px solid ${selectedNewImageIndex === idx ? 'var(--accent)' : 'var(--border)'}`,
+                          background: 'var(--bg)',
+                          overflow: 'hidden',
+                          cursor: 'pointer',
+                        }}
+                        aria-label="Seleccionar imagen nueva"
+                        title="Seleccionar nueva"
+                      >
+                        <img src={src} alt="Imagen nueva" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                      </button>
+                    ))}
+                  </div>
+                )}
                 <div>
                   <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 6 }}>Imagen del producto</div>
                   <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-                    <input type="file" accept="image/*" onChange={e => onImageChange(e.target.files?.[0] || null)} />
+                    <input type="file" accept="image/*" multiple onChange={e => onAddImages(Array.from(e.target.files || []))} />
                     <CameraCaptureButton
-                      onCapture={onImageChange}
+                      onCapture={onAddImage}
                       modalTitle="Capturar imagen del producto"
                       buttonTitle="Tomar foto del producto"
                       fileNamePrefix="producto"
                     />
+                    {editTarget?.id && formState.imageFiles.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={uploadPendingNewImagesNow}
+                        style={{ padding: '8px 12px', borderRadius: 10, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)', cursor: 'pointer', fontWeight: 700 }}
+                      >
+                        Subir nuevas
+                      </button>
+                    )}
                   </div>
-                  {formState.imageFile && <div className="file-name">{formState.imageFile.name}</div>}
+                  {editTarget?.id && (
+                    <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginTop: 10 }}>
+                      <input
+                        ref={replaceExistingImageRef}
+                        type="file"
+                        accept="image/*"
+                        style={{ display: 'none' }}
+                        onChange={(e) => {
+                          const file = e.target.files?.[0] || null
+                          e.target.value = ''
+                          if (!file) return
+                          void replaceSelectedExistingImage(file)
+                        }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => replaceExistingImageRef.current?.click()}
+                        disabled={!selectedExistingImageId || formState.imageItems.length === 0}
+                        style={{ padding: '8px 12px', borderRadius: 10, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)', cursor: 'pointer', fontWeight: 700, opacity: (!selectedExistingImageId || formState.imageItems.length === 0) ? 0.55 : 1 }}
+                      >
+                        Reemplazar seleccionada
+                      </button>
+                      <button
+                        type="button"
+                        onClick={deleteSelectedExistingImage}
+                        disabled={!selectedExistingImageId || formState.imageItems.length === 0}
+                        style={{ padding: '8px 12px', borderRadius: 10, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)', cursor: 'pointer', fontWeight: 700, opacity: (!selectedExistingImageId || formState.imageItems.length === 0) ? 0.55 : 1 }}
+                      >
+                        Eliminar seleccionada
+                      </button>
+                      <button
+                        type="button"
+                        onClick={makeSelectedImagePrimary}
+                        disabled={!selectedExistingImageId || formState.imageItems.length === 0}
+                        style={{ padding: '8px 12px', borderRadius: 10, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)', cursor: 'pointer', fontWeight: 700, opacity: (!selectedExistingImageId || formState.imageItems.length === 0) ? 0.55 : 1 }}
+                      >
+                        Hacer principal
+                      </button>
+                      {selectedNewImageIndex !== null && (
+                        <button
+                          type="button"
+                          onClick={() => removeNewImageAt(selectedNewImageIndex)}
+                          style={{ padding: '8px 12px', borderRadius: 10, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)', cursor: 'pointer', fontWeight: 700 }}
+                        >
+                          Quitar nueva
+                        </button>
+                      )}
+                    </div>
+                  )}
+                  {(formState.imageUrls.length + formState.imageFiles.length) > 0 && (
+                    <div className="file-name">
+                      Imágenes: {formState.imageUrls.length + formState.imageFiles.length} (Guardadas: {formState.imageUrls.length} / Nuevas: {formState.imageFiles.length})
+                    </div>
+                  )}
                   <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 6 }}>
-                    Puedes subir una imagen o capturarla desde el telefono o una webcam USB.
+                    Puedes subir varias imágenes o capturarlas desde el teléfono o una webcam USB.
                   </div>
                 </div>
                 <div style={{ padding: 12, borderRadius: 16, background: 'var(--modal)', border: '1px solid var(--border)' }}>

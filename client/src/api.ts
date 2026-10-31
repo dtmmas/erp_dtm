@@ -149,6 +149,30 @@ export async function updateProduct(id: number, form: FormData) {
   return data
 }
 
+export async function addProductImages(id: number, files: File[]) {
+  const fd = new FormData()
+  for (const file of files) fd.append('images', file)
+  const { data } = await api.post(`/products/${id}/images`, fd)
+  return data
+}
+
+export async function replaceProductImage(productId: number, imageId: number, file: File) {
+  const fd = new FormData()
+  fd.append('image', file)
+  const { data } = await api.put(`/products/${productId}/images/${imageId}`, fd)
+  return data
+}
+
+export async function deleteProductImage(productId: number, imageId: number) {
+  const { data } = await api.delete(`/products/${productId}/images/${imageId}`)
+  return data
+}
+
+export async function reorderProductImages(productId: number, orderIds: number[]) {
+  const { data } = await api.put(`/products/${productId}/images/reorder`, { orderIds })
+  return data
+}
+
 export async function deleteProduct(id: number) {
   await api.delete(`/products/${id}`)
 }
@@ -203,6 +227,97 @@ export async function deleteBrand(id: number) {
 export async function getSuppliers() {
   const { data } = await api.get('/suppliers')
   return data
+}
+
+export async function getSupplierPendingPurchases(id: number | string) {
+  const { data } = await api.get(`/purchases/suppliers/${id}/pending`)
+  return data as {
+    supplier: { id: number; name: string }
+    totals: { pendingCount: number; totalPending: number }
+    purchases: Array<{
+      id: number
+      docNo?: string | null
+      createdAt: string
+      dueDate?: string | null
+      total: number
+      paidAmount: number
+      balanceDue: number
+      paymentStatus: string
+    }>
+  }
+}
+
+export async function getSupplierPayments(id: number | string) {
+  const { data } = await api.get(`/purchases/suppliers/${id}/payments`)
+  return data as Array<{
+    id: number
+    supplierId: number
+    amount: number
+    paymentMethod: string
+    reference?: string | null
+    notes?: string | null
+    documentPath?: string | null
+    paidAt: string
+    userName?: string | null
+    allocations: Array<{
+      purchaseId: number
+      purchasePaymentId?: number | null
+      amount: number
+      docNo?: string | null
+      createdAt: string
+      dueDate?: string | null
+    }>
+  }>
+}
+
+export async function paySupplier(id: number | string, form: FormData) {
+  const { data } = await api.post(`/purchases/suppliers/${id}/payments`, form)
+  return data as {
+    success: boolean
+    supplierId: number
+    supplierName: string
+    supplierPaymentId: number
+    amount: number
+    paymentMethod: string
+    reference?: string | null
+    notes?: string | null
+    totalPendingBefore: number
+    remainingPending: number
+    allocations: Array<{
+      purchaseId: number
+      docNo?: string | null
+      dueDate?: string | null
+      allocatedAmount: number
+      balanceDue: number
+      paymentStatus: string
+    }>
+  }
+}
+
+export async function getPurchasePayments(id: number | string) {
+  const { data } = await api.get(`/purchases/${id}/payments`)
+  return data as Array<{
+    id: number
+    purchase_id: number
+    amount: number
+    payment_method: string
+    reference?: string | null
+    notes?: string | null
+    document_path?: string | null
+    paid_at: string
+    user_name?: string | null
+  }>
+}
+
+export async function payPurchase(id: number | string, form: FormData) {
+  const { data } = await api.post(`/purchases/${id}/payments`, form)
+  return data as {
+    success: boolean
+    purchaseId: number
+    paidAmount: number
+    balanceDue: number
+    paymentStatus: string
+  }
 }
 
 // Units helpers
@@ -314,6 +429,40 @@ export async function getMySalesReport(params: { limit?: number; search?: string
   }
 }
 
+export async function getMyCollectionsReport(params: { limit?: number; search?: string; offset?: number; startDate?: string; endDate?: string; paymentMethod?: string; statusFilter?: string }) {
+  const { data } = await api.get('/sales/my-collections', { params })
+  return data as {
+    data: Array<{
+      id: number
+      doc_no: string
+      total: number
+      created_at: string
+      paid_at?: string | null
+      payment_method: string
+      customer_name?: string
+      received_amount?: number
+      change_amount?: number
+      reference_number?: string
+      is_credit?: number
+      status?: string
+      cancellation_reason?: string
+      seller_id?: number | null
+      seller_name?: string | null
+    }>
+    pagination: {
+      total: number
+      limit: number
+      offset: number
+    }
+    summary: {
+      records: number
+      collectedTotal: number
+      creditTotal: number
+      cancelledCount: number
+    }
+  }
+}
+
 export async function getSaleDetails(id: number) {
   const { data } = await api.get(`/sales/${id}`)
   return data
@@ -322,6 +471,69 @@ export async function getSaleDetails(id: number) {
 export async function cancelSale(id: number, reason: string) {
   const { data } = await api.post(`/sales/${id}/cancel`, { reason })
   return data
+}
+
+export async function getPendingPaymentSales(params?: { userId?: number; warehouseId?: number; limit?: number }) {
+  const { data } = await api.get('/sales/pending-payment', { params })
+  return data as {
+    items: Array<{
+      id: number
+      docNo: string
+      total: number
+      createdAt: string
+      customerName: string
+      sellerName: string
+      itemsCount: number
+      pendingPaymentMethod?: 'CASH' | 'CARD' | 'DEPOSIT' | 'CREDIT' | null
+      pendingReferenceNumber?: string | null
+      pendingDownPaymentAmount?: number | null
+      pendingDownPaymentMethod?: 'CASH' | 'CARD' | 'DEPOSIT' | null
+      pendingDownPaymentReference?: string | null
+    }>
+  }
+}
+
+export async function collectPendingSalePayment(
+  id: number,
+  payload: {
+    paymentMethod: 'CASH' | 'CARD' | 'DEPOSIT' | 'CREDIT'
+    receivedAmount?: number
+    changeAmount?: number
+    referenceNumber?: string | null
+    creditInstallments?: Array<{ amount: number; dueDate: string }>
+    downPaymentAmount?: number
+    downPaymentMethod?: 'CASH' | 'CARD' | 'DEPOSIT'
+    downPaymentReference?: string | null
+  },
+  documentFile?: File | null,
+  downPaymentDocumentFile?: File | null
+) {
+  if (documentFile || downPaymentDocumentFile) {
+    const form = new FormData()
+    form.append('paymentMethod', payload.paymentMethod)
+    form.append('receivedAmount', String(payload.receivedAmount ?? ''))
+    form.append('changeAmount', String(payload.changeAmount ?? ''))
+    form.append('referenceNumber', payload.referenceNumber ?? '')
+    if (payload.downPaymentAmount != null) {
+      form.append('downPaymentAmount', String(payload.downPaymentAmount))
+    }
+    if (payload.downPaymentMethod != null) {
+      form.append('downPaymentMethod', String(payload.downPaymentMethod))
+    }
+    if (payload.downPaymentReference != null) {
+      form.append('downPaymentReference', String(payload.downPaymentReference || ''))
+    }
+    if (payload.creditInstallments) {
+      form.append('creditInstallments', JSON.stringify(payload.creditInstallments))
+    }
+    if (documentFile) form.append('document', documentFile)
+    if (downPaymentDocumentFile) form.append('downPaymentDocument', downPaymentDocumentFile)
+    const { data } = await api.post(`/sales/${id}/collect-payment`, form)
+    return data as { success: boolean; saleId: number }
+  }
+
+  const { data } = await api.post(`/sales/${id}/collect-payment`, payload)
+  return data as { success: boolean; saleId: number }
 }
 
 export async function createUnit(payload: { code: string; name: string }) {
@@ -397,6 +609,73 @@ export async function transferProductWarehouseStock(productId: number, payload: 
   return data as { ok: boolean }
 }
 
+// Logistics / Shipments
+export async function getShipments(params?: { status?: string; type?: string; driverUserId?: number; search?: string }) {
+  const { data } = await api.get('/shipments', { params })
+  return data as any[]
+}
+
+export async function getMyShipments() {
+  const { data } = await api.get('/shipments/my')
+  return data as any[]
+}
+
+export async function getShipment(id: number) {
+  const { data } = await api.get(`/shipments/${id}`)
+  return data as any
+}
+
+export async function createShipment(payload: any) {
+  const { data } = await api.post('/shipments', payload)
+  return data as { success: boolean; shipmentId: number }
+}
+
+export async function assignShipment(id: number, payload: { driverUserId: number; vehicleId?: number | null }) {
+  const { data } = await api.post(`/shipments/${id}/assign`, payload)
+  return data as { success: boolean }
+}
+
+export async function getVehicles() {
+  const { data } = await api.get('/shipments/vehicles')
+  return data as any[]
+}
+
+export async function getDrivers() {
+  const { data } = await api.get('/shipments/drivers')
+  return data as any[]
+}
+
+export async function getPendingShipmentSales() {
+  const { data } = await api.get('/shipments/pending-sales')
+  return data as Array<{
+    id: number
+    doc_no: string
+    warehouse_id: number | null
+    warehouse_name: string
+    customer_id: number | null
+    customer_name: string
+    customer_phone: string
+    customer_address: string
+    total: string | number
+    created_at: string
+  }>
+}
+
+export async function createVehicle(payload: { plate: string; name?: string; capacity?: string; active?: number }) {
+  const { data } = await api.post('/shipments/vehicles', payload)
+  return data as { success: boolean; id: number }
+}
+
+export async function addShipmentEvent(id: number, payload: FormData) {
+  const { data } = await api.post(`/shipments/${id}/event`, payload)
+  return data as { success: boolean; eventId: number }
+}
+
+export async function completeShipment(id: number, payload: FormData) {
+  const { data } = await api.post(`/shipments/${id}/complete`, payload)
+  return data as { success: boolean; eventId: number; issueId?: number | null; status: string }
+}
+
 // Credits helpers
 export async function getCredits(params?: { search?: string; status?: string; startDate?: string; endDate?: string }) {
   const { data } = await api.get('/credits', { params })
@@ -405,11 +684,14 @@ export async function getCredits(params?: { search?: string; status?: string; st
     sale_id: number
     due_date: string
     total_amount: string | number
+    sale_total?: string | number
     paid: number
     doc_no: string
     sale_date: string
     customer_name: string
     paid_amount: string | number
+    installments_count?: number
+    installment_number?: number
   }>
 }
 
@@ -418,17 +700,91 @@ export async function payCredit(payload: FormData) {
   return data as { success: boolean; paymentId: number }
 }
 
+export async function payCreditSale(payload: FormData) {
+  const { data } = await api.post('/credits/pay-sale', payload)
+  return data as {
+    success: boolean
+    paymentIds: number[]
+    totalApplied: number
+    penaltyApplied: number
+    principalApplied: number
+    allocations: Array<{
+      installmentId: number
+      paymentType: string
+      amount: number
+      paymentId: number
+    }>
+  }
+}
+
 export async function getCreditPayments(id: number) {
   const { data } = await api.get(`/credits/${id}/payments`)
   return data as Array<{
     id: number
     amount: string | number
+    payment_type?: string
     payment_method: string
     reference: string
     created_at: string
     received_by: string
     document_url?: string | null
   }>
+}
+
+export async function getCreditSalePayments(saleId: number) {
+  const { data } = await api.get(`/credits/sale/${saleId}/payments`)
+  return data as Array<{
+    id: number
+    amount: string | number
+    payment_type?: string
+    payment_method: string
+    reference: string
+    created_at: string
+    received_by: string
+    document_url?: string | null
+    installment_id?: number
+    installment_due_date?: string
+    installment_amount?: string | number
+    installment_number?: number
+  }>
+}
+
+export async function getCreditContractBySale(saleId: number) {
+  const { data } = await api.get(`/credit-contracts/sale/${saleId}`)
+  return data as { contract: any | null }
+}
+
+export async function getCreditContractHtmlBySale(saleId: number) {
+  const { data } = await api.get(`/credit-contracts/sale/${saleId}/html`, { responseType: 'text' as any })
+  return data as string
+}
+
+export async function getCreditContractSettlementHtmlBySale(saleId: number) {
+  const { data } = await api.get(`/credit-contracts/sale/${saleId}/settlement-html`, { responseType: 'text' as any })
+  return data as string
+}
+
+export async function generateCreditContractBySale(
+  saleId: number,
+  payload: {
+    customer?: {
+      phone?: string
+      address?: string
+      dpi?: string
+      age?: string | number
+      nationality?: string
+      civilStatus?: string
+      occupation?: string
+      municipality?: string
+      department?: string
+    }
+    warrantyTime?: string
+    references?: Array<{ name?: string; phone?: string }>
+    buyerSignatureData: string
+  }
+) {
+  const { data } = await api.post(`/credit-contracts/sale/${saleId}/generate`, payload)
+  return data as { contractId: number; sha256: string; html: string }
 }
 
 export async function getConfig() {

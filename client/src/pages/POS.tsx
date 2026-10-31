@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
-import { api, getCashStatus, getProducts } from '../api'
+import { api, getCashStatus, getCreditContractBySale, getProducts } from '../api'
 import { useConfigStore } from '../store/config'
 import { useAuthStore } from '../store/auth'
 import { useNavigate } from 'react-router-dom'
@@ -10,6 +10,8 @@ import { formatCompanyName } from '../utils/text'
 import { getWarehouseHighlightStyle } from '../utils/warehouseHighlight'
 import { addLogoToPdf, buildPrintLogoHtml } from '../utils/printBranding'
 import MobileBarcodeScannerButton from '../components/MobileBarcodeScannerButton'
+import SignaturePad from '../components/SignaturePad'
+import { GUATEMALA_DEPARTMENTS, getGuatemalaMunicipalities } from '../data/gt_locations'
 
 interface Product {
   id: number
@@ -59,6 +61,26 @@ interface Customer {
   id: number
   name: string
   document?: string
+  phone?: string
+  address?: string
+  age?: number | null
+  nationality?: string
+  civil_status?: string
+  occupation?: string
+  municipality?: string
+  department?: string
+}
+
+interface ServerDraftSale {
+  id: number
+  total: number
+  doc_no?: string | null
+  customer_id: number
+  user_id: number
+  warehouse_id: number
+  created_at?: string
+  customer_name?: string
+  seller_name?: string
 }
 
 interface HeldSale {
@@ -71,7 +93,29 @@ interface HeldSale {
   paymentMethod: 'CASH' | 'CARD' | 'DEPOSIT' | 'CREDIT'
   receivedAmount: string
   referenceNumber: string
+  creditDownPayment?: string
+  creditInstallments?: CreditInstallmentDraft[]
+  creditPlanConfirmed?: boolean
+  creditContractPayload?: any | null
+  creditContractCustomer?: {
+    phone: string
+    address: string
+    dpi: string
+    age: string
+    nationality: string
+    civilStatus: string
+    occupation: string
+    municipality: string
+    department: string
+  }
+  creditContractWarrantyTime?: string
+  creditContractRefs?: Array<{ name: string; phone: string }>
   total: number
+}
+
+type CreditInstallmentDraft = {
+  amount: string
+  dueDate: string
 }
 
 type CompletedSale = {
@@ -92,6 +136,102 @@ type GeneratedQuote = {
 }
 
 type POSMode = 'sale' | 'quote'
+
+function formatInputDate(date: Date) {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function addDaysToInputDate(baseDate: string | Date, days: number) {
+  const base = typeof baseDate === 'string'
+    ? new Date(`${(baseDate || formatInputDate(new Date())).slice(0, 10)}T12:00:00`)
+    : new Date(baseDate)
+  base.setDate(base.getDate() + days)
+  return formatInputDate(base)
+}
+
+function buildCreditInstallmentDrafts(total: number, count: number, firstDueDate?: string): CreditInstallmentDraft[] {
+  const safeCount = Math.max(1, Math.min(36, Number(count) || 1))
+  const totalCents = Math.max(0, Math.round(Number(total || 0) * 100))
+  const baseAmount = Math.floor(totalCents / safeCount)
+  let remainder = totalCents - (baseAmount * safeCount)
+  const startDate = firstDueDate || addDaysToInputDate(new Date(), 30)
+
+  return Array.from({ length: safeCount }, (_, index) => {
+    const cents = baseAmount + (remainder > 0 ? 1 : 0)
+    remainder = Math.max(0, remainder - 1)
+    return {
+      amount: (cents / 100).toFixed(2),
+      dueDate: index === 0 ? startDate : addDaysToInputDate(startDate, index * 30),
+    }
+  })
+}
+
+function normalizeStoredCreditInstallments(value: unknown): CreditInstallmentDraft[] {
+  if (!Array.isArray(value) || value.length === 0) return []
+  return value
+    .map((installment: any) => ({
+      amount: String(installment?.amount ?? ''),
+      dueDate: String(installment?.dueDate ?? installment?.due_date ?? ''),
+    }))
+    .filter(installment => installment.amount || installment.dueDate)
+}
+
+function validateCreditInstallments(installments: CreditInstallmentDraft[], total: number) {
+  if (!Array.isArray(installments) || installments.length === 0) {
+    return { valid: false, error: 'Debes registrar al menos una cuota para la venta a crédito' }
+  }
+
+  const normalized = installments.map((installment, index) => {
+    const amount = Math.round(Number(installment.amount || 0) * 100) / 100
+    const dueDate = String(installment.dueDate || '').trim()
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return { error: `La cuota #${index + 1} debe tener un monto válido` }
+    }
+
+    if (!dueDate) {
+      return { error: `La cuota #${index + 1} debe tener fecha de vencimiento` }
+    }
+
+    return {
+      amount,
+      dueDate,
+    }
+  })
+
+  const invalid = normalized.find(item => 'error' in item)
+  if (invalid && 'error' in invalid) {
+    return { valid: false, error: invalid.error }
+  }
+
+  const installmentsTotal = Math.round(
+    (normalized as Array<{ amount: number; dueDate: string }>).reduce((sum, installment) => sum + installment.amount, 0) * 100
+  ) / 100
+  const expectedTotal = Math.round(Number(total || 0) * 100) / 100
+
+  if (Math.abs(installmentsTotal - expectedTotal) > 0.01) {
+    return { valid: false, error: 'La suma de las cuotas no coincide con el total de la venta' }
+  }
+
+  return {
+    valid: true,
+    installments: normalized as Array<{ amount: number; dueDate: string }>,
+  }
+}
+
+async function fileToDataUrl(file: File) {
+  const buf = await file.arrayBuffer()
+  const bytes = new Uint8Array(buf)
+  let binary = ''
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i])
+  const b64 = btoa(binary)
+  const mime = String(file.type || '').toLowerCase()
+  const safeMime = mime.startsWith('image/') ? mime : 'image/png'
+  return `data:${safeMime};base64,${b64}`
+}
 
 export default function POS({ mode = 'sale' }: { mode?: POSMode }) {
   const isQuoteMode = mode === 'quote'
@@ -115,11 +255,43 @@ export default function POS({ mode = 'sale' }: { mode?: POSMode }) {
   const [paymentMethod, setPaymentMethod] = useState<'CASH' | 'CARD' | 'DEPOSIT' | 'CREDIT'>('CASH')
   const [receivedAmount, setReceivedAmount] = useState<string>('')
   const [referenceNumber, setReferenceNumber] = useState<string>('')
+  const [creditDownPayment, setCreditDownPayment] = useState<string>('0')
+  const [creditInstallments, setCreditInstallments] = useState<CreditInstallmentDraft[]>(() => buildCreditInstallmentDrafts(0, 1))
+  const [creditInlineAlert, setCreditInlineAlert] = useState<{ kind: 'error' | 'warn' | 'ok'; text: string } | null>(null)
+  const [creditPlanConfirmed, setCreditPlanConfirmed] = useState(false)
+  const [creditContractModalOpen, setCreditContractModalOpen] = useState(false)
+  const [creditContractPayload, setCreditContractPayload] = useState<any | null>(null)
+  const [creditContractSignatureFile, setCreditContractSignatureFile] = useState<File | null>(null)
+  const [creditContractCustomer, setCreditContractCustomer] = useState({
+    phone: '',
+    address: '',
+    dpi: '',
+    age: '',
+    nationality: 'guatemalteco(a)',
+    civilStatus: '',
+    occupation: '',
+    municipality: '',
+    department: '',
+  })
+  const [creditContractWarrantyTime, setCreditContractWarrantyTime] = useState('')
+  const [creditContractRefs, setCreditContractRefs] = useState<Array<{ name: string; phone: string }>>([
+    { name: '', phone: '' },
+    { name: '', phone: '' },
+    { name: '', phone: '' },
+    { name: '', phone: '' },
+  ])
+  const guatemalaDepartments = useMemo(() => GUATEMALA_DEPARTMENTS.map(d => d.name), [])
+  const guatemalaMunicipalities = useMemo(() => getGuatemalaMunicipalities(creditContractCustomer.department), [creditContractCustomer.department])
   const [isCustomerModalOpen, setIsCustomerModalOpen] = useState(false)
   const [isMobileCartOpen, setIsMobileCartOpen] = useState(false)
   const [isPhoneViewport, setIsPhoneViewport] = useState(false)
   const [isPhonePaymentPanelOpen, setIsPhonePaymentPanelOpen] = useState(false)
   const [isPhoneHeldSalesOpen, setIsPhoneHeldSalesOpen] = useState(false)
+  const [isServerDraftsOpen, setIsServerDraftsOpen] = useState(false)
+  const [serverDrafts, setServerDrafts] = useState<ServerDraftSale[]>([])
+  const [serverDraftsLoading, setServerDraftsLoading] = useState(false)
+  const [serverDraftsLoaded, setServerDraftsLoaded] = useState(false)
+  const [currentServerDraftId, setCurrentServerDraftId] = useState<number | null>(null)
 
   // Batch Selection State
   const [selectedProductForBatch, setSelectedProductForBatch] = useState<Product | null>(null)
@@ -149,6 +321,11 @@ export default function POS({ mode = 'sale' }: { mode?: POSMode }) {
   const canChangePosPrice = hasExplicitPermission('pos:change_price')
   const canUseManualPosPrice = hasExplicitPermission('pos:manual_price')
   const canViewProjectedProfit = isAdmin || hasPermission('products:sensitive:read')
+  const canOperateCash = isAdmin
+    || hasPermission('cash:view')
+    || hasPermission('cash:open')
+    || hasPermission('cash:movements')
+    || hasPermission('cash:close')
   // Print Settings
   const [shouldPrintTicket, setShouldPrintTicket] = useState(true)
   const [lastSale, setLastSale] = useState<CompletedSale | null>(null)
@@ -178,9 +355,32 @@ export default function POS({ mode = 'sale' }: { mode?: POSMode }) {
   const modeChipLabel = isQuoteMode ? 'Modo cotización' : 'Modo venta'
 
   useEffect(() => {
-    if (isQuoteMode) return
+    if (isQuoteMode || !canOperateCash) {
+      setIsCashOpen(null)
+      return
+    }
     checkCashStatus()
-  }, [isQuoteMode])
+  }, [isQuoteMode, canOperateCash])
+
+  useEffect(() => {
+    if (paymentMethod !== 'CREDIT') {
+      setCreditContractPayload(null)
+      setCreditContractModalOpen(false)
+      setCreditContractSignatureFile(null)
+      setCreditPlanConfirmed(false)
+    }
+  }, [paymentMethod])
+
+  useEffect(() => {
+    if (paymentMethod !== 'CREDIT') return
+    if (!selectedCustomer) {
+      setCreditContractPayload(null)
+      return
+    }
+    const payloadCustomerId = Number((creditContractPayload as any)?.customerId || 0)
+    if (payloadCustomerId && payloadCustomerId === Number(selectedCustomer)) return
+    setCreditContractPayload(null)
+  }, [selectedCustomer])
 
   useEffect(() => {
     const mediaQuery = window.matchMedia('(max-width: 768px)')
@@ -249,7 +449,10 @@ export default function POS({ mode = 'sale' }: { mode?: POSMode }) {
     try {
       const raw = localStorage.getItem(heldSalesStorageKey)
       const parsed = raw ? JSON.parse(raw) : []
-      setHeldSales(Array.isArray(parsed) ? parsed : [])
+      setHeldSales(Array.isArray(parsed) ? parsed.map((sale: any) => ({
+        ...sale,
+        creditInstallments: normalizeStoredCreditInstallments(sale?.creditInstallments),
+      })) : [])
     } catch (err) {
       console.error('Error loading held POS sales:', err)
       setHeldSales([])
@@ -268,7 +471,7 @@ export default function POS({ mode = 'sale' }: { mode?: POSMode }) {
   }, [heldSales, heldSalesStorageKey, heldSalesLoaded])
 
   useEffect(() => {
-    if (isQuoteMode) return
+    if (isQuoteMode || !canOperateCash) return
     const refreshCashStatus = () => {
       checkCashStatus()
     }
@@ -289,9 +492,13 @@ export default function POS({ mode = 'sale' }: { mode?: POSMode }) {
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       window.clearInterval(intervalId)
     }
-  }, [isQuoteMode])
+  }, [isQuoteMode, canOperateCash])
 
   const checkCashStatus = async () => {
+    if (!canOperateCash) {
+      setIsCashOpen(null)
+      return
+    }
     try {
       const status = await getCashStatus()
       setIsCashOpen(status.isOpen)
@@ -725,6 +932,46 @@ export default function POS({ mode = 'sale' }: { mode?: POSMode }) {
     return cart.reduce((sum, item) => sum + Number(item.quantity || 0), 0)
   }, [cart])
 
+  const creditDownPaymentAmount = useMemo(() => {
+    return Math.max(0, Math.round(Number(creditDownPayment || 0) * 100) / 100)
+  }, [creditDownPayment])
+
+  const creditBaseTotal = useMemo(() => {
+    return Math.round(Math.max(0, total - creditDownPaymentAmount) * 100) / 100
+  }, [total, creditDownPaymentAmount])
+
+  useEffect(() => {
+    if (paymentMethod !== 'CREDIT') {
+      setCreditInlineAlert(null)
+    }
+  }, [paymentMethod])
+
+  const creditInstallmentsTotal = useMemo(() => {
+    return Math.round(creditInstallments.reduce((sum, installment) => sum + (Number(installment.amount || 0) || 0), 0) * 100) / 100
+  }, [creditInstallments])
+
+  const creditDifference = useMemo(() => {
+    return Math.round((creditBaseTotal - creditInstallmentsTotal) * 100) / 100
+  }, [creditBaseTotal, creditInstallmentsTotal])
+
+  useEffect(() => {
+    if (paymentMethod !== 'CREDIT') return
+    if (creditInstallments.length === 0) {
+      setCreditInstallments(buildCreditInstallmentDrafts(creditBaseTotal, 1))
+      return
+    }
+
+    const allAmountsEmpty = creditInstallments.every(installment => !Number(installment.amount || 0))
+    if (allAmountsEmpty && creditBaseTotal > 0) {
+      setCreditInstallments(prev => buildCreditInstallmentDrafts(creditBaseTotal, prev.length || 1, prev[0]?.dueDate))
+    }
+  }, [paymentMethod, creditBaseTotal, creditInstallments])
+
+  useEffect(() => {
+    if (paymentMethod !== 'CREDIT') return
+    setCreditPlanConfirmed(false)
+  }, [paymentMethod, creditDownPayment, creditInstallments])
+
   const shouldCollapsePhonePayment = isPhoneViewport
   const showPhoneProductsOnly = shouldCollapsePhonePayment && !isPhonePaymentPanelOpen
   const showPhoneCheckoutContext = !showPhoneProductsOnly
@@ -754,7 +1001,42 @@ export default function POS({ mode = 'sale' }: { mode?: POSMode }) {
     setPaymentMethod('CASH')
     setReceivedAmount('')
     setReferenceNumber('')
+    setCreditDownPayment('0')
+    setCreditInstallments(buildCreditInstallmentDrafts(0, 1))
     setIsPhonePaymentPanelOpen(false)
+    setCurrentServerDraftId(null)
+  }
+
+  const regenerateCreditInstallments = (count = creditInstallments.length || 1) => {
+    setCreditInstallments(prev => buildCreditInstallmentDrafts(creditBaseTotal, count, prev[0]?.dueDate))
+  }
+
+  const updateCreditInstallment = (index: number, field: keyof CreditInstallmentDraft, value: string) => {
+    setCreditInstallments(prev => prev.map((installment, installmentIndex) => (
+      installmentIndex === index
+        ? { ...installment, [field]: value }
+        : installment
+    )))
+  }
+
+  const addCreditInstallment = () => {
+    setCreditInstallments(prev => {
+      const lastDueDate = prev[prev.length - 1]?.dueDate || addDaysToInputDate(new Date(), 30)
+      return [
+        ...prev,
+        {
+          amount: '0.00',
+          dueDate: addDaysToInputDate(lastDueDate, 30),
+        },
+      ]
+    })
+  }
+
+  const removeCreditInstallment = (index: number) => {
+    setCreditInstallments(prev => {
+      if (prev.length <= 1) return prev
+      return prev.filter((_, installmentIndex) => installmentIndex !== index)
+    })
   }
 
   const downloadTicketPdf = (blobUrl: string, saleId: number) => {
@@ -1194,6 +1476,13 @@ export default function POS({ mode = 'sale' }: { mode?: POSMode }) {
       paymentMethod,
       receivedAmount,
       referenceNumber,
+      creditDownPayment,
+      creditInstallments: creditInstallments.map(installment => ({ ...installment })),
+      creditPlanConfirmed,
+      creditContractPayload,
+      creditContractCustomer: { ...creditContractCustomer },
+      creditContractWarrantyTime,
+      creditContractRefs: creditContractRefs.map(r => ({ ...r })),
       total
     }
   }
@@ -1239,10 +1528,34 @@ export default function POS({ mode = 'sale' }: { mode?: POSMode }) {
     setPaymentMethod(heldSale.paymentMethod)
     setReceivedAmount(heldSale.receivedAmount)
     setReferenceNumber(heldSale.referenceNumber)
+    setCreditDownPayment(String((heldSale as any)?.creditDownPayment ?? '0'))
+    setCreditContractCustomer((heldSale as any)?.creditContractCustomer
+      ? { ...(heldSale as any).creditContractCustomer }
+      : creditContractCustomer)
+    setCreditContractWarrantyTime(String((heldSale as any)?.creditContractWarrantyTime ?? ''))
+    setCreditContractRefs(Array.isArray((heldSale as any)?.creditContractRefs) ? (heldSale as any).creditContractRefs : creditContractRefs)
+    setCreditContractPayload((heldSale as any)?.creditContractPayload ?? null)
+    setCreditPlanConfirmed(Boolean((heldSale as any)?.creditPlanConfirmed))
+    setCreditInstallments(normalizeStoredCreditInstallments(heldSale.creditInstallments).length
+      ? normalizeStoredCreditInstallments(heldSale.creditInstallments)
+      : buildCreditInstallmentDrafts(heldSale.total, 1))
     alert(`${isQuoteMode ? 'Cotización' : 'Venta'} retomada: ${heldSale.name}`)
   }
 
   const generateTicket = async (saleId: number, date: string, items: CartItem[], totalAmount: number, paymentDetails?: any, customer?: Customer, printWindow?: Window | null) => {
+    if (String(paymentDetails?.paymentMethod || '').toUpperCase() === 'CREDIT') {
+      try {
+        const meta = await getCreditContractBySale(saleId)
+        if (!meta?.contract?.buyer_signed_at) {
+          alert('No se puede imprimir el ticket/plan de cuotas sin contrato firmado')
+          return
+        }
+      } catch {
+        alert('No se pudo validar contrato para imprimir el ticket/plan de cuotas')
+        return
+      }
+    }
+
     // Calcular altura dinámica
     const headerHeight = 58
     const itemHeight = 5
@@ -1298,6 +1611,8 @@ export default function POS({ mode = 'sale' }: { mode?: POSMode }) {
           doc.text(`Depósito Ref: ${paymentDetails.referenceNumber}`, 5, y)
        } else if (paymentDetails.paymentMethod === 'CREDIT') {
           doc.text(`Venta a Crédito`, 5, y)
+       } else if (paymentDetails.paymentMethod === 'PENDING') {
+          doc.text(`Pendiente de cobro en caja`, 5, y)
        }
     }
 
@@ -1313,8 +1628,65 @@ export default function POS({ mode = 'sale' }: { mode?: POSMode }) {
     downloadTicketPdf(blobUrl, saleId)
   }
 
+  const openCreditContractModal = () => {
+    if (!selectedCustomer) {
+      setCreditInlineAlert({ kind: 'error', text: 'Selecciona un cliente antes de completar el contrato.' })
+      return
+    }
+    const c = customers.find(x => x.id === selectedCustomer)
+    setCreditContractCustomer((prev) => ({
+      ...prev,
+      phone: String((c as any)?.phone || prev.phone || ''),
+      address: String((c as any)?.address || prev.address || ''),
+      dpi: String((c as any)?.document || prev.dpi || ''),
+      age: String((c as any)?.age ?? prev.age ?? ''),
+      nationality: String((c as any)?.nationality || prev.nationality || 'guatemalteco(a)'),
+      civilStatus: String((c as any)?.civil_status || prev.civilStatus || ''),
+      occupation: String((c as any)?.occupation || prev.occupation || ''),
+      municipality: String((c as any)?.municipality || prev.municipality || ''),
+      department: String((c as any)?.department || prev.department || ''),
+    }))
+    setCreditContractSignatureFile(null)
+    setCreditContractModalOpen(true)
+  }
+
+  const submitCreditContract = async () => {
+    if (!creditContractSignatureFile) {
+      alert('Firma del comprador requerida')
+      return
+    }
+    if (!selectedCustomer) {
+      setCreditInlineAlert({ kind: 'error', text: 'Selecciona un cliente antes de guardar el contrato.' })
+      return
+    }
+    const buyerSignatureData = await fileToDataUrl(creditContractSignatureFile)
+    setCreditContractPayload({
+      customerId: selectedCustomer,
+      customer: {
+        phone: creditContractCustomer.phone,
+        address: creditContractCustomer.address,
+        dpi: creditContractCustomer.dpi,
+        age: creditContractCustomer.age,
+        nationality: creditContractCustomer.nationality,
+        civilStatus: creditContractCustomer.civilStatus,
+        occupation: creditContractCustomer.occupation,
+        municipality: creditContractCustomer.municipality,
+        department: creditContractCustomer.department,
+      },
+      warrantyTime: creditContractWarrantyTime,
+      references: creditContractRefs.map(r => ({ name: r.name, phone: r.phone })),
+      buyerSignatureData,
+    })
+    setCreditInlineAlert({ kind: 'ok', text: 'Contrato firmado listo.' })
+    setCreditContractModalOpen(false)
+  }
+
   const handleCheckout = async () => {
     if (cart.length === 0) return
+    if (!canOperateCash) {
+      alert('Tu usuario no tiene permisos para cobrar. Debes enviar la venta a caja.')
+      return
+    }
 
     if (isCashOpen === false) {
       alert('Caja cerrada. Debes abrir caja antes de vender.')
@@ -1332,6 +1704,11 @@ export default function POS({ mode = 'sale' }: { mode?: POSMode }) {
     } else if (paymentMethod === 'CARD' || paymentMethod === 'DEPOSIT') {
        if (!referenceNumber.trim()) {
          alert('Por favor ingrese el número de referencia')
+         return
+       }
+    } else if (paymentMethod === 'CREDIT') {
+       if (!selectedCustomer) {
+         alert('Debes seleccionar un cliente para registrar la venta a crédito')
          return
        }
     }
@@ -1361,6 +1738,25 @@ export default function POS({ mode = 'sale' }: { mode?: POSMode }) {
       const isCreditSale = paymentMethod === 'CREDIT'
       const received = parseFloat(receivedAmount) || 0
       const change = received - total
+      if (isCreditSale && !creditContractPayload) {
+        setCreditInlineAlert({ kind: 'error', text: 'Completa el contrato y la firma antes de continuar.' })
+        openCreditContractModal()
+        return
+      }
+      if (isCreditSale && !creditPlanConfirmed) {
+        setCreditInlineAlert({ kind: 'error', text: 'Confirma el enganche y las cuotas antes de continuar.' })
+        return
+      }
+      if (isCreditSale && creditDownPaymentAmount >= total - 0.01) {
+        setCreditInlineAlert({ kind: 'error', text: 'El enganche debe ser menor al total de la venta.' })
+        return
+      }
+      const creditPlan = isCreditSale ? validateCreditInstallments(creditInstallments, creditBaseTotal) : null
+
+      if (creditPlan && !creditPlan.valid) {
+        setCreditInlineAlert({ kind: 'error', text: creditPlan.error })
+        return
+      }
 
       const res = await api.post('/sales', {
         customerId: selectedCustomer,
@@ -1379,7 +1775,10 @@ export default function POS({ mode = 'sale' }: { mode?: POSMode }) {
         paymentMethod,
         receivedAmount: paymentMethod === 'CASH' ? received : 0,
         changeAmount: paymentMethod === 'CASH' ? change : 0,
-        referenceNumber: (paymentMethod === 'CARD' || paymentMethod === 'DEPOSIT') ? referenceNumber : null
+        referenceNumber: (paymentMethod === 'CARD' || paymentMethod === 'DEPOSIT') ? referenceNumber : null,
+        downPaymentAmount: isCreditSale ? creditDownPaymentAmount : undefined,
+        creditInstallments: creditPlan?.valid ? creditPlan.installments : undefined,
+        creditContract: isCreditSale ? creditContractPayload : undefined,
       })
 
       if (res.data.success) {
@@ -1392,7 +1791,8 @@ export default function POS({ mode = 'sale' }: { mode?: POSMode }) {
              paymentMethod,
              receivedAmount: paymentMethod === 'CASH' ? received : 0,
              changeAmount: paymentMethod === 'CASH' ? change : 0,
-             referenceNumber: (paymentMethod === 'CARD' || paymentMethod === 'DEPOSIT') ? referenceNumber : null
+             referenceNumber: (paymentMethod === 'CARD' || paymentMethod === 'DEPOSIT') ? referenceNumber : null,
+             creditInstallments: creditPlan?.valid ? creditPlan.installments : undefined,
           },
           customer: selectedCustomer ? customers.find(c => c.id === selectedCustomer) : undefined
         }
@@ -1430,6 +1830,333 @@ export default function POS({ mode = 'sale' }: { mode?: POSMode }) {
           printWindow.close()
         } catch {}
       }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleSendToCashRegister = async () => {
+    if (cart.length === 0) return
+
+    const selectedCustomerRow = selectedCustomer ? customers.find(c => c.id === selectedCustomer) : undefined
+    if (!selectedCustomerRow || !String(selectedCustomerRow.name || '').trim()) {
+      alert('Debes seleccionar un cliente real (con nombre) para enviar la venta a caja')
+      return
+    }
+
+    setLoading(true)
+    try {
+      const isCreditSale = paymentMethod === 'CREDIT'
+      let creditPlan: ReturnType<typeof validateCreditInstallments> | null = null
+
+      if (isCreditSale) {
+        if (!creditContractPayload) {
+          setCreditInlineAlert({ kind: 'error', text: 'Completa el contrato y la firma antes de enviar a caja.' })
+          openCreditContractModal()
+          return
+        }
+        if (!creditPlanConfirmed) {
+          setCreditInlineAlert({ kind: 'error', text: 'Confirma el enganche y las cuotas antes de enviar a caja.' })
+          return
+        }
+        if (creditDownPaymentAmount >= total - 0.01) {
+          setCreditInlineAlert({ kind: 'error', text: 'El enganche debe ser menor al total de la venta.' })
+          return
+        }
+        creditPlan = validateCreditInstallments(creditInstallments, creditBaseTotal)
+        if (!creditPlan.valid) {
+          setCreditInlineAlert({ kind: 'error', text: creditPlan.error })
+          return
+        }
+      }
+
+      const res = await api.post('/sales', {
+        customerId: selectedCustomer,
+        items: cart.map(item => ({
+          productId: item.id,
+          quantity: item.quantity,
+          price: item.price,
+          priceSource: item.priceSource || 'BASE',
+          batchNo: item.batchNo,
+          expiryDate: item.expiryDate,
+          imei: item.imei,
+          serial: item.serial
+        })),
+        total,
+        sendToCashier: true,
+        paymentMethod,
+        isCredit: isCreditSale,
+        referenceNumber: (paymentMethod === 'CARD' || paymentMethod === 'DEPOSIT') ? referenceNumber : null,
+        downPaymentAmount: isCreditSale ? creditDownPaymentAmount : undefined,
+        creditInstallments: creditPlan?.valid ? creditPlan.installments : undefined,
+        creditContract: isCreditSale ? creditContractPayload : undefined,
+      })
+
+      if (res.data.success) {
+        const saleData: CompletedSale = {
+          saleId: res.data.saleId,
+          date: formatDateTime(new Date()),
+          items: [...cart],
+          total,
+          paymentDetails: {
+            paymentMethod: 'PENDING',
+          },
+          customer: selectedCustomerRow
+        }
+
+        setLastSale(saleData)
+        if (shouldPrintTicket) {
+          await generateTicket(
+            saleData.saleId,
+            saleData.date,
+            saleData.items,
+            saleData.total,
+            saleData.paymentDetails,
+            saleData.customer
+          )
+        }
+        resetCurrentSale()
+        void loadData()
+        alert(`Venta #${saleData.saleId} enviada a caja para cobro.`)
+      }
+    } catch (err) {
+      console.error(err)
+      alert((err as any)?.response?.data?.error || 'Error al enviar la venta a caja')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const loadServerDrafts = async () => {
+    setServerDraftsLoading(true)
+    try {
+      const res = await api.get('/sales/drafts', { params: { limit: 100, onlyMine: 1 } })
+      const items = Array.isArray(res.data?.items) ? res.data.items : []
+      setServerDrafts(items)
+      setServerDraftsLoaded(true)
+    } catch (err) {
+      console.error(err)
+      alert((err as any)?.response?.data?.error || 'Error al cargar borradores')
+    } finally {
+      setServerDraftsLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!isServerDraftsOpen) return
+    void loadServerDrafts()
+  }, [isServerDraftsOpen])
+
+  const handleSaveServerDraft = async () => {
+    if (cart.length === 0) return
+    if (!selectedCustomer) {
+      if (paymentMethod === 'CREDIT') setCreditInlineAlert({ kind: 'error', text: 'Selecciona un cliente antes de guardar el borrador de crédito.' })
+      else alert('Debes seleccionar un cliente para guardar el borrador')
+      return
+    }
+
+    setLoading(true)
+    try {
+      if (paymentMethod === 'CREDIT') {
+        if (!creditContractPayload) {
+          setCreditInlineAlert({ kind: 'error', text: 'Completa el contrato y la firma antes de guardar el borrador.' })
+          openCreditContractModal()
+          return
+        }
+        if (!creditPlanConfirmed) {
+          setCreditInlineAlert({ kind: 'error', text: 'Confirma el enganche y las cuotas antes de guardar el borrador.' })
+          return
+        }
+        if (creditDownPaymentAmount >= total - 0.01) {
+          setCreditInlineAlert({ kind: 'error', text: 'El enganche debe ser menor al total de la venta.' })
+          return
+        }
+        const creditPlan = validateCreditInstallments(creditInstallments, creditBaseTotal)
+        if (!creditPlan.valid) {
+          setCreditInlineAlert({ kind: 'error', text: creditPlan.error })
+          return
+        }
+      }
+
+      const payload = {
+        customerId: selectedCustomer,
+        items: cart.map(item => ({
+          productId: item.id,
+          quantity: item.quantity,
+          price: item.price,
+          priceSource: item.priceSource || 'BASE',
+          batchNo: item.batchNo,
+          expiryDate: item.expiryDate,
+          imei: item.imei,
+          serial: item.serial
+        })),
+        total,
+        paymentMethod: paymentMethod === 'CREDIT' ? 'CREDIT' : undefined,
+        downPaymentAmount: paymentMethod === 'CREDIT' ? creditDownPaymentAmount : undefined,
+        creditInstallments: paymentMethod === 'CREDIT'
+          ? validateCreditInstallments(creditInstallments, creditBaseTotal).installments
+          : undefined,
+        creditContract: paymentMethod === 'CREDIT' ? creditContractPayload : undefined,
+      }
+
+      const res = currentServerDraftId
+        ? await api.put(`/sales/${currentServerDraftId}/draft`, payload)
+        : await api.post('/sales', { ...payload, saveAsDraft: true })
+
+      if (res.data?.success) {
+        const saleId = Number(res.data.saleId || 0)
+        if (saleId) setCurrentServerDraftId(saleId)
+        await loadServerDrafts()
+        alert(saleId ? `Borrador guardado (#${saleId}).` : 'Borrador guardado.')
+      }
+    } catch (err) {
+      console.error(err)
+      alert((err as any)?.response?.data?.error || 'Error al guardar el borrador')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleLoadServerDraft = async (draftId: number) => {
+    if (!Number.isFinite(draftId) || draftId <= 0) return
+    if (cart.length > 0) {
+      const ok = window.confirm('Hay productos en el carrito. ¿Deseas reemplazar el carrito con este borrador?')
+      if (!ok) return
+    }
+
+    setLoading(true)
+    try {
+      const res = await api.get(`/sales/${draftId}`)
+      const sale = res.data
+      const items = Array.isArray(sale?.items) ? sale.items : []
+      const nextCart: CartItem[] = items.map((it: any) => {
+        const productId = Number(it.product_id || 0)
+        const baseProduct = products.find(p => p.id === productId)
+        const name = String(it.product_name || baseProduct?.name || '')
+        const unitPrice = Number(it.unit_price || it.price || 0)
+        const quantity = Number(it.quantity || 0)
+        const productType = (baseProduct?.productType || it.product_type || 'GENERAL') as any
+        return {
+          id: productId,
+          name,
+          price: unitPrice,
+          stock: Number(baseProduct?.stock || 0),
+          otherStock: baseProduct?.otherStock,
+          imageUrl: baseProduct?.imageUrl,
+          categoryId: baseProduct?.categoryId,
+          brandId: baseProduct?.brandId,
+          sku: String(it.sku || baseProduct?.sku || ''),
+          productCode: baseProduct?.productCode,
+          productType,
+          quantity,
+          originalPrice: it.original_unit_price != null ? Number(it.original_unit_price) : undefined,
+          priceSource: (it.price_source || 'BASE') as any,
+          batchNo: it.batch_no || undefined,
+          expiryDate: it.expiry_date ? String(it.expiry_date).slice(0, 10) : undefined,
+          imei: it.imei || undefined,
+          serial: it.serial || undefined,
+        }
+      }).filter((x: any) => x.id && x.quantity)
+
+      setCart(nextCart)
+      setSelectedCustomer(sale?.customer_id ? Number(sale.customer_id) : null)
+
+      const rawPendingPaymentMethod = String(
+        sale?.pending_payment_method
+        ?? sale?.pendingPaymentMethod
+        ?? sale?.pending_paymentMethod
+        ?? sale?.payment_method
+        ?? sale?.paymentMethod
+        ?? ''
+      ).trim().toUpperCase()
+      let nextPaymentMethod = rawPendingPaymentMethod || 'CASH'
+      if (nextPaymentMethod === 'TRANSFER') nextPaymentMethod = 'DEPOSIT'
+      if (!['CASH', 'CARD', 'DEPOSIT', 'CREDIT'].includes(nextPaymentMethod)) nextPaymentMethod = 'CASH'
+
+      const pendingReference = String(
+        sale?.installments?.referenceNumber
+        ?? sale?.installments?.reference_number
+        ?? sale?.pending_reference_number
+        ?? sale?.pendingReferenceNumber
+        ?? sale?.reference_number
+        ?? sale?.referenceNumber
+        ?? ''
+      ).trim()
+
+      const pendingDownPaymentRaw = sale?.installments?.downPaymentAmount
+        ?? sale?.installments?.down_payment_amount
+        ?? sale?.pending_down_payment_amount
+        ?? sale?.pendingDownPaymentAmount
+        ?? sale?.down_payment_amount
+        ?? sale?.downPaymentAmount
+        ?? 0
+      const pendingDownPaymentAmount = Math.max(0, Math.round(Number(pendingDownPaymentRaw || 0) * 100) / 100)
+      const nextTotal = nextCart.reduce((sum, item) => sum + (Number(item.price || 0) * Number(item.quantity || 0)), 0)
+      const nextCreditBaseTotal = Math.round(Math.max(0, nextTotal - pendingDownPaymentAmount) * 100) / 100
+
+      const normalizedServerInstallments = normalizeStoredCreditInstallments(
+        Array.isArray(sale?.installments)
+          ? sale.installments
+          : (Array.isArray(sale?.installments?.items) ? sale.installments.items : [])
+      )
+
+      setPaymentMethod(nextPaymentMethod as any)
+      setReceivedAmount('')
+      setReferenceNumber(pendingReference)
+      setCreditDownPayment(nextPaymentMethod === 'CREDIT' ? String(pendingDownPaymentAmount) : '0')
+      setCreditInstallments(
+        normalizedServerInstallments.length
+          ? normalizedServerInstallments
+          : (nextPaymentMethod === 'CREDIT' ? buildCreditInstallmentDrafts(nextCreditBaseTotal, 1) : buildCreditInstallmentDrafts(0, 1))
+      )
+      setCreditContractPayload(null)
+      setCreditContractSignatureFile(null)
+      setCurrentServerDraftId(draftId)
+      setIsServerDraftsOpen(false)
+    } catch (err) {
+      console.error(err)
+      alert((err as any)?.response?.data?.error || 'Error al cargar el borrador')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleSendServerDraftToCashier = async (draftId: number) => {
+    if (!Number.isFinite(draftId) || draftId <= 0) return
+    const ok = window.confirm(`¿Enviar el borrador #${draftId} a caja? Esto reservará inventario.`)
+    if (!ok) return
+    setLoading(true)
+    try {
+      const res = await api.post(`/sales/${draftId}/send-to-cashier`)
+      if (res.data?.success) {
+        await loadServerDrafts()
+        if (currentServerDraftId === draftId) resetCurrentSale()
+        alert(`Venta #${draftId} enviada a caja para cobro.`)
+      }
+    } catch (err) {
+      console.error(err)
+      alert((err as any)?.response?.data?.error || 'Error al enviar a caja')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleCancelServerDraft = async (draftId: number) => {
+    if (!Number.isFinite(draftId) || draftId <= 0) return
+    const reason = String(window.prompt(`Motivo de cancelación para el borrador #${draftId}:`) || '').trim()
+    if (!reason) return
+
+    setLoading(true)
+    try {
+      const res = await api.post(`/sales/${draftId}/cancel`, { reason })
+      if (res.data?.success) {
+        await loadServerDrafts()
+        if (currentServerDraftId === draftId) resetCurrentSale()
+        alert(`Borrador #${draftId} cancelado.`)
+      }
+    } catch (err) {
+      console.error(err)
+      alert((err as any)?.response?.data?.error || 'Error al cancelar el borrador')
     } finally {
       setLoading(false)
     }
@@ -1493,7 +2220,7 @@ export default function POS({ mode = 'sale' }: { mode?: POSMode }) {
                 {isQuoteMode ? 'Cotizador' : 'Ventas / POS'}
               </div>
               <div style={{ fontSize: '0.9rem', color: 'var(--muted)' }}>
-                {isQuoteMode ? 'Prepara cotizaciones sin afectar caja ni inventario.' : 'Procesa ventas y emite ticket desde el punto de venta.'}
+                {isQuoteMode ? 'Prepara cotizaciones sin afectar caja ni inventario.' : 'Registra la venta, envíala a caja o cóbrala al instante si operas una caja abierta.'}
               </div>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
@@ -1824,31 +2551,65 @@ export default function POS({ mode = 'sale' }: { mode?: POSMode }) {
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                   <span style={{ fontWeight: 600, fontSize: '1.2rem', color: 'var(--text)' }}>{currentOrderLabel}</span>
+                  {currentServerDraftId && (
+                    <span style={{ fontSize: 12, fontWeight: 800, color: '#2563eb', background: 'rgba(37, 99, 235, 0.12)', border: '1px solid rgba(37, 99, 235, 0.24)', padding: '6px 10px', borderRadius: 999 }}>
+                      Borrador #{currentServerDraftId}
+                    </span>
+                  )}
                   <button
                     onClick={() => holdCurrentSale()}
                     disabled={cart.length === 0}
                     style={{
                       color: cart.length === 0 ? 'var(--muted)' : '#f59e0b',
                       background: cart.length === 0 ? 'var(--surface)' : 'rgba(245, 158, 11, 0.12)',
-                      border: cart.length === 0 ? '1px solid var(--border)' : '1px solid rgba(245, 158, 11, 0.28)',
+                      border: cart.length === 0 ? '1px solid rgba(148, 163, 184, 0.25)' : '1px solid rgba(245, 158, 11, 0.22)',
                       cursor: cart.length === 0 ? 'not-allowed' : 'pointer',
-                      fontWeight: 700,
-                      borderRadius: 999,
-                      padding: '7px 12px'
+                      fontWeight: 800,
+                      borderRadius: 10,
+                      padding: '6px 10px'
                     }}
                   >
                     En espera
+                  </button>
+                  <button
+                    onClick={handleSaveServerDraft}
+                    disabled={cart.length === 0 || loading}
+                    style={{
+                      color: cart.length === 0 || loading ? 'var(--muted)' : '#2563eb',
+                      background: cart.length === 0 || loading ? 'var(--surface)' : 'rgba(37, 99, 235, 0.12)',
+                      border: cart.length === 0 || loading ? '1px solid rgba(148, 163, 184, 0.25)' : '1px solid rgba(37, 99, 235, 0.2)',
+                      cursor: cart.length === 0 || loading ? 'not-allowed' : 'pointer',
+                      fontWeight: 800,
+                      borderRadius: 10,
+                      padding: '6px 10px'
+                    }}
+                  >
+                    Borrador
+                  </button>
+                  <button
+                    onClick={() => setIsServerDraftsOpen(true)}
+                    style={{
+                      color: 'var(--text)',
+                      background: 'var(--surface)',
+                      border: '1px solid rgba(148, 163, 184, 0.25)',
+                      cursor: 'pointer',
+                      fontWeight: 800,
+                      borderRadius: 10,
+                      padding: '6px 10px'
+                    }}
+                  >
+                    Borradores
                   </button>
                   <button
                     onClick={resetCurrentSale}
                     style={{
                       color: '#ef4444',
                       background: 'rgba(239, 68, 68, 0.1)',
-                      border: '1px solid rgba(239, 68, 68, 0.24)',
+                      border: '1px solid rgba(239, 68, 68, 0.2)',
                       cursor: 'pointer',
-                      fontWeight: 700,
-                      borderRadius: 999,
-                      padding: '7px 12px'
+                      fontWeight: 800,
+                      borderRadius: 10,
+                      padding: '6px 10px'
                     }}
                   >
                     Vaciar
@@ -2138,7 +2899,7 @@ export default function POS({ mode = 'sale' }: { mode?: POSMode }) {
                     className="primary-btn"
                     style={{ width: '100%' }}
                   >
-                    {isQuoteMode ? 'Confirmar cotización' : 'Confirmar pago'}
+                    {isQuoteMode ? 'Confirmar cotización' : (canOperateCash ? 'Confirmar pago' : 'Confirmar venta')}
                   </button>
                   <button
                     type="button"
@@ -2189,7 +2950,16 @@ export default function POS({ mode = 'sale' }: { mode?: POSMode }) {
 
           {!isQuoteMode && showExpandedPaymentPanel && (
             <div style={{ marginBottom: 16 }}>
-              <label style={{ display: 'block', marginBottom: 8, fontWeight: 'bold', color: 'var(--muted)' }}>Método de Pago:</label>
+              <div style={{ marginBottom: 14, padding: 12, borderRadius: 10, border: '1px solid rgba(59, 130, 246, 0.25)', background: 'rgba(59, 130, 246, 0.08)', color: 'var(--text)' }}>
+                <div style={{ fontWeight: 700, marginBottom: 4 }}>Flujo vendedor + caja</div>
+                <div style={{ fontSize: '0.9rem', color: 'var(--muted)' }}>
+                  {canOperateCash
+                    ? 'Puedes enviar esta venta a caja para que el cajero la cobre después. Si esta caja está abierta para tu usuario, también puedes cobrarla aquí mismo.'
+                    : 'Tu usuario puede preparar la venta y enviarla a caja para que el cajero la cobre. El cobro directo no está habilitado para este rol.'}
+                </div>
+              </div>
+              <>
+              <label style={{ display: 'block', marginBottom: 8, fontWeight: 'bold', color: 'var(--muted)' }}>Tipo de venta:</label>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
               <button
                 onClick={() => setPaymentMethod('CASH')}
@@ -2234,7 +3004,19 @@ export default function POS({ mode = 'sale' }: { mode?: POSMode }) {
                 🏦 Depósito
               </button>
               <button
-                onClick={() => setPaymentMethod('CREDIT')}
+                onClick={() => {
+                  setPaymentMethod('CREDIT')
+                  setCreditInlineAlert(null)
+                  if (!selectedCustomer) {
+                    setCreditInlineAlert({ kind: 'error', text: 'Selecciona un cliente antes de ingresar a crédito.' })
+                    return
+                  }
+                  if (!creditContractPayload) {
+                    openCreditContractModal()
+                    return
+                  }
+                  regenerateCreditInstallments(creditInstallments.length || 1)
+                }}
                 style={{
                   padding: 8,
                   border: `1px solid ${paymentMethod === 'CREDIT' ? '#e67e22' : 'var(--border)'}`,
@@ -2250,7 +3032,7 @@ export default function POS({ mode = 'sale' }: { mode?: POSMode }) {
             </div>
 
             <div style={{ marginTop: 16 }}>
-              {paymentMethod === 'CASH' && (
+              {canOperateCash && paymentMethod === 'CASH' && (
                 <div>
                   <label style={{ display: 'block', marginBottom: 8, fontWeight: 'bold', color: 'var(--muted)' }}>Cantidad Recibida:</label>
                   <input
@@ -2276,7 +3058,7 @@ export default function POS({ mode = 'sale' }: { mode?: POSMode }) {
                 </div>
               )}
 
-              {(paymentMethod === 'CARD' || paymentMethod === 'DEPOSIT') && (
+              {canOperateCash && (paymentMethod === 'CARD' || paymentMethod === 'DEPOSIT') && (
                 <div>
                   <label style={{ display: 'block', marginBottom: 8, fontWeight: 'bold', color: 'var(--muted)' }}>Número de Referencia:</label>
                   <input
@@ -2296,7 +3078,225 @@ export default function POS({ mode = 'sale' }: { mode?: POSMode }) {
                   />
                 </div>
               )}
+
+              {!canOperateCash && (paymentMethod === 'CASH' || paymentMethod === 'CARD' || paymentMethod === 'DEPOSIT') && (
+                <div style={{ padding: 12, borderRadius: 10, border: '1px solid rgba(148, 163, 184, 0.25)', background: 'var(--surface)', color: 'var(--muted)', fontWeight: 700 }}>
+                  El cobro lo realiza Caja. La referencia/comprobante se captura al cobrar.
+                </div>
+              )}
+
+              {paymentMethod === 'CREDIT' && (
+                <div style={{ display: 'grid', gap: 12 }}>
+                  {creditInlineAlert && (
+                    <div
+                      style={{
+                        padding: '10px 12px',
+                        borderRadius: 10,
+                        border: creditInlineAlert.kind === 'error'
+                          ? '1px solid rgba(239, 68, 68, 0.25)'
+                          : (creditInlineAlert.kind === 'warn'
+                            ? '1px solid rgba(245, 158, 11, 0.25)'
+                            : '1px solid rgba(22, 163, 74, 0.25)'),
+                        background: creditInlineAlert.kind === 'error'
+                          ? 'rgba(239, 68, 68, 0.08)'
+                          : (creditInlineAlert.kind === 'warn'
+                            ? 'rgba(245, 158, 11, 0.08)'
+                            : 'rgba(22, 163, 74, 0.08)'),
+                        color: creditInlineAlert.kind === 'error'
+                          ? '#ef4444'
+                          : (creditInlineAlert.kind === 'warn' ? '#f59e0b' : '#16a34a'),
+                        fontWeight: 800
+                      }}
+                    >
+                      {creditInlineAlert.text}
+                    </div>
+                  )}
+                  <div style={{ padding: 12, borderRadius: 10, background: 'rgba(245, 158, 11, 0.12)', border: '1px solid rgba(245, 158, 11, 0.28)' }}>
+                    <div style={{ fontWeight: 700, marginBottom: 4, color: '#b45309' }}>Venta a crédito por cuotas</div>
+                    <div style={{ fontSize: '0.9rem', color: 'var(--text)' }}>
+                      Define el plan de abonos con monto y fecha de vencimiento para cada cuota.
+                    </div>
+                    {!selectedCustomer && (
+                      <div style={{ marginTop: 8, fontSize: '0.9rem', color: '#dc2626', fontWeight: 600 }}>
+                        Selecciona un cliente antes de confirmar la venta a crédito.
+                      </div>
+                    )}
+                  </div>
+
+                  <div style={{ padding: 12, borderRadius: 10, border: '1px solid var(--border)', background: 'var(--modal)', display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <div style={{ display: 'grid', gap: 4 }}>
+                      <div style={{ fontWeight: 800, color: 'var(--text)' }}>Contrato</div>
+                      <div style={{ fontSize: '0.85rem', color: creditContractPayload ? '#16a34a' : '#dc2626', fontWeight: 700 }}>
+                        {creditContractPayload ? 'Contrato firmado listo' : 'Obligatorio antes de confirmar'}
+                      </div>
+                    </div>
+                    <button type="button" onClick={openCreditContractModal} className="btn-secondary" disabled={!selectedCustomer}>
+                      {creditContractPayload ? 'Editar' : 'Completar'}
+                    </button>
+                  </div>
+
+                  <div style={{ display: 'grid', gap: 10 }}>
+                    <div>
+                      <label style={{ display: 'block', marginBottom: 6, fontWeight: 'bold', color: 'var(--muted)' }}>Enganche</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={creditDownPayment}
+                        onChange={e => setCreditDownPayment(e.target.value)}
+                        style={{
+                          width: '100%',
+                          padding: 10,
+                          border: '1px solid var(--border)',
+                          borderRadius: 6,
+                          background: 'var(--modal)',
+                          color: 'var(--text)'
+                        }}
+                      />
+                      <div style={{ marginTop: 6, fontSize: 12, color: 'var(--muted)' }}>
+                        Saldo a crédito: <strong style={{ color: 'var(--text)' }}>{formatMoney(creditBaseTotal)}</strong>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'end' }}>
+                    <div style={{ flex: '1 1 120px' }}>
+                      <label style={{ display: 'block', marginBottom: 6, fontWeight: 'bold', color: 'var(--muted)' }}>Cantidad de cuotas</label>
+                      <input
+                        type="number"
+                        min="1"
+                        max="36"
+                        value={creditInstallments.length}
+                        onChange={e => regenerateCreditInstallments(Number(e.target.value || 1))}
+                        style={{
+                          width: '100%',
+                          padding: 10,
+                          border: '1px solid var(--border)',
+                          borderRadius: 6,
+                          background: 'var(--modal)',
+                          color: 'var(--text)'
+                        }}
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => regenerateCreditInstallments(creditInstallments.length || 1)}
+                      className="btn-secondary"
+                    >
+                      Repartir monto
+                    </button>
+                    <button
+                      type="button"
+                      onClick={addCreditInstallment}
+                      className="btn-secondary"
+                    >
+                      Agregar cuota
+                    </button>
+                  </div>
+
+                  <div style={{ display: 'grid', gap: 10 }}>
+                    {creditInstallments.map((installment, index) => (
+                      <div key={`${index}_${installment.dueDate}`} style={{ display: 'grid', gridTemplateColumns: isPhoneViewport ? '1fr' : '110px 1fr 1fr auto', gap: 8, alignItems: 'end', padding: 10, borderRadius: 10, border: '1px solid var(--border)', background: 'var(--modal)' }}>
+                        <div style={{ fontWeight: 700, color: 'var(--text)' }}>Cuota {index + 1}</div>
+                        <div>
+                          <label style={{ display: 'block', marginBottom: 6, fontSize: '0.85rem', color: 'var(--muted)' }}>Monto</label>
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={installment.amount}
+                            onChange={e => updateCreditInstallment(index, 'amount', e.target.value)}
+                            style={{ width: '100%', padding: 10, border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)', color: 'var(--text)' }}
+                          />
+                        </div>
+                        <div>
+                          <label style={{ display: 'block', marginBottom: 6, fontSize: '0.85rem', color: 'var(--muted)' }}>Vence el</label>
+                          <input
+                            type="date"
+                            value={installment.dueDate}
+                            onChange={e => updateCreditInstallment(index, 'dueDate', e.target.value)}
+                            style={{ width: '100%', padding: 10, border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg)', color: 'var(--text)' }}
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => removeCreditInstallment(index)}
+                          className="btn-secondary"
+                          disabled={creditInstallments.length <= 1}
+                        >
+                          Quitar
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 10 }}>
+                    <div style={{ padding: 10, borderRadius: 8, background: 'var(--modal)', border: '1px solid var(--border)' }}>
+                      <div style={{ fontSize: '0.8rem', color: 'var(--muted)' }}>Total venta</div>
+                      <div style={{ fontWeight: 700, marginTop: 4, color: 'var(--text)' }}>{formatMoney(total)}</div>
+                    </div>
+                    <div style={{ padding: 10, borderRadius: 8, background: 'var(--modal)', border: '1px solid var(--border)' }}>
+                      <div style={{ fontSize: '0.8rem', color: 'var(--muted)' }}>Total cuotas</div>
+                      <div style={{ fontWeight: 700, marginTop: 4, color: 'var(--text)' }}>{formatMoney(creditInstallmentsTotal)}</div>
+                    </div>
+                    <div style={{ padding: 10, borderRadius: 8, background: 'var(--modal)', border: '1px solid var(--border)' }}>
+                      <div style={{ fontSize: '0.8rem', color: 'var(--muted)' }}>Diferencia</div>
+                      <div style={{ fontWeight: 700, marginTop: 4, color: Math.abs(creditDifference) < 0.01 ? '#16a34a' : '#dc2626' }}>
+                        {formatMoney(Math.abs(creditDifference))}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
+                    <div
+                      style={{
+                        padding: '8px 12px',
+                        borderRadius: 10,
+                        border: creditPlanConfirmed ? '1px solid rgba(22, 163, 74, 0.28)' : '1px solid rgba(239, 68, 68, 0.22)',
+                        background: creditPlanConfirmed ? 'rgba(22, 163, 74, 0.08)' : 'rgba(239, 68, 68, 0.06)',
+                        color: creditPlanConfirmed ? '#16a34a' : '#dc2626',
+                        fontWeight: 900,
+                        whiteSpace: 'nowrap'
+                      }}
+                    >
+                      {creditPlanConfirmed ? 'Plan confirmado' : 'Plan sin confirmar'}
+                    </div>
+
+                    <button
+                      type="button"
+                      disabled={creditPlanConfirmed}
+                      onClick={() => {
+                        setCreditInlineAlert(null)
+                        if (!selectedCustomer) {
+                          setCreditInlineAlert({ kind: 'error', text: 'Selecciona un cliente antes de confirmar el plan.' })
+                          return
+                        }
+                        if (!creditContractPayload) {
+                          setCreditInlineAlert({ kind: 'error', text: 'Completa el contrato y la firma antes de confirmar el plan.' })
+                          openCreditContractModal()
+                          return
+                        }
+                        if (creditDownPaymentAmount >= total - 0.01) {
+                          setCreditInlineAlert({ kind: 'error', text: 'El enganche debe ser menor al total de la venta.' })
+                          return
+                        }
+                        const creditPlan = validateCreditInstallments(creditInstallments, creditBaseTotal)
+                        if (!creditPlan.valid) {
+                          setCreditInlineAlert({ kind: 'error', text: creditPlan.error })
+                          return
+                        }
+                        setCreditPlanConfirmed(true)
+                        setCreditInlineAlert({ kind: 'ok', text: 'Plan de crédito confirmado.' })
+                      }}
+                      className="btn-secondary"
+                    >
+                      Confirmar plan
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
+              </>
             </div>
           )}
 
@@ -2335,24 +3335,44 @@ export default function POS({ mode = 'sale' }: { mode?: POSMode }) {
                 {loading ? 'Generando...' : 'Generar cotización'}
               </button>
             ) : showExpandedPaymentPanel ? (
-              <button
-                onClick={handleCheckout}
-                disabled={cart.length === 0 || loading}
-                style={{
-                  width: '100%',
-                  padding: 16,
-                  backgroundColor: '#16a34a',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: 6,
-                  fontSize: '1.1rem',
-                  fontWeight: 'bold',
-                  cursor: cart.length === 0 || loading ? 'not-allowed' : 'pointer',
-                  opacity: cart.length === 0 || loading ? 0.7 : 1
-                }}
-              >
-                {loading ? 'Procesando...' : 'Pagar'}
-              </button>
+              <>
+                <button
+                  onClick={handleSendToCashRegister}
+                  disabled={cart.length === 0 || loading}
+                  style={{
+                    width: '100%',
+                    padding: 15,
+                    backgroundColor: '#2563eb',
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: 6,
+                    fontSize: '1.02rem',
+                    fontWeight: 'bold',
+                    cursor: cart.length === 0 || loading ? 'not-allowed' : 'pointer',
+                    opacity: cart.length === 0 || loading ? 0.7 : 1
+                  }}
+                >
+                  {loading ? 'Procesando...' : 'Enviar a caja'}
+                </button>
+                <button
+                  onClick={handleCheckout}
+                  disabled={cart.length === 0 || loading || !canOperateCash}
+                  style={{
+                    width: '100%',
+                    padding: 16,
+                    backgroundColor: '#16a34a',
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: 6,
+                    fontSize: '1.1rem',
+                    fontWeight: 'bold',
+                    cursor: cart.length === 0 || loading || !canOperateCash ? 'not-allowed' : 'pointer',
+                    opacity: cart.length === 0 || loading || !canOperateCash ? 0.7 : 1
+                  }}
+                >
+                  {loading ? 'Procesando...' : 'Cobrar ahora'}
+                </button>
+              </>
             ) : null}
 
             {!isQuoteMode && lastSale && showExpandedPaymentPanel && (
@@ -2369,7 +3389,9 @@ export default function POS({ mode = 'sale' }: { mode?: POSMode }) {
                     textAlign: 'center'
                   }}
                 >
-                   Ultima venta registrada: #{lastSale.saleId}
+                   {lastSale.paymentDetails?.paymentMethod === 'PENDING'
+                     ? `Última orden enviada a caja: #${lastSale.saleId}`
+                     : `Última venta registrada: #${lastSale.saleId}`}
                 </div>
             )}
             {isQuoteMode && lastQuote && showExpandedPaymentPanel && (
@@ -2394,6 +3416,197 @@ export default function POS({ mode = 'sale' }: { mode?: POSMode }) {
 
         {!isPhoneViewport && renderHeldSalesSection(showPhoneProductsOnly)}
       </div>
+
+      {creditContractModalOpen && (
+        <div style={{
+          position: 'fixed',
+          inset: 0,
+          background: 'rgba(0,0,0,0.6)',
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: isPhoneViewport ? 'flex-end' : 'center',
+          zIndex: 1001,
+          padding: isPhoneViewport ? 0 : 16
+        }}>
+          <div className="responsive-modal" style={{
+            background: 'var(--modal)',
+            padding: isPhoneViewport ? 16 : 20,
+            borderRadius: isPhoneViewport ? '18px 18px 0 0' : 12,
+            border: '1px solid var(--border)',
+            width: isPhoneViewport ? '100%' : '90%',
+            maxWidth: 860,
+            maxHeight: '90vh',
+            overflowY: 'auto',
+            overflowX: 'hidden'
+          }}>
+            <h2 style={{ marginTop: 0, marginBottom: 16 }}>Contrato de crédito</h2>
+
+            <div style={{ marginBottom: 14, fontSize: 12, color: 'var(--muted)' }}>
+              Este paso es obligatorio antes de confirmar una venta a crédito.
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: isPhoneViewport ? '1fr' : '1fr 1fr', gap: 12 }}>
+              <div>
+                <label style={{ display: 'block', marginBottom: 6, fontWeight: 700 }}>Teléfono *</label>
+                <input
+                  value={creditContractCustomer.phone}
+                  onChange={(e) => setCreditContractCustomer({ ...creditContractCustomer, phone: e.target.value })}
+                  style={{ width: '100%' }}
+                />
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: 6, fontWeight: 700 }}>DPI *</label>
+                <input
+                  value={creditContractCustomer.dpi}
+                  onChange={(e) => setCreditContractCustomer({ ...creditContractCustomer, dpi: e.target.value })}
+                  style={{ width: '100%' }}
+                />
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: 6, fontWeight: 700 }}>Edad *</label>
+                <input
+                  type="number"
+                  min="0"
+                  value={creditContractCustomer.age}
+                  onChange={(e) => setCreditContractCustomer({ ...creditContractCustomer, age: e.target.value })}
+                  style={{ width: '100%' }}
+                />
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: 6, fontWeight: 700 }}>Nacionalidad *</label>
+                <input
+                  value={creditContractCustomer.nationality}
+                  onChange={(e) => setCreditContractCustomer({ ...creditContractCustomer, nationality: e.target.value })}
+                  style={{ width: '100%' }}
+                />
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: 6, fontWeight: 700 }}>Estado civil *</label>
+                <input
+                  value={creditContractCustomer.civilStatus}
+                  onChange={(e) => setCreditContractCustomer({ ...creditContractCustomer, civilStatus: e.target.value })}
+                  style={{ width: '100%' }}
+                />
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: 6, fontWeight: 700 }}>Profesión u oficio *</label>
+                <input
+                  value={creditContractCustomer.occupation}
+                  onChange={(e) => setCreditContractCustomer({ ...creditContractCustomer, occupation: e.target.value })}
+                  style={{ width: '100%' }}
+                />
+              </div>
+              <div style={{ gridColumn: isPhoneViewport ? 'auto' : '1 / span 2' }}>
+                <label style={{ display: 'block', marginBottom: 6, fontWeight: 700 }}>Dirección *</label>
+                <input
+                  value={creditContractCustomer.address}
+                  onChange={(e) => setCreditContractCustomer({ ...creditContractCustomer, address: e.target.value })}
+                  style={{ width: '100%' }}
+                />
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: 6, fontWeight: 700 }}>Departamento *</label>
+                <select
+                  value={creditContractCustomer.department}
+                  onChange={(e) => setCreditContractCustomer({ ...creditContractCustomer, department: e.target.value, municipality: '' })}
+                  style={{ width: '100%', padding: 10, borderRadius: 8, background: 'var(--modal)', color: 'var(--text)', border: '1px solid var(--border)' }}
+                >
+                  <option value="">Selecciona un departamento…</option>
+                  {guatemalaDepartments.map((d) => (
+                    <option key={d} value={d}>
+                      {d}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: 6, fontWeight: 700 }}>Municipio *</label>
+                <select
+                  value={creditContractCustomer.municipality}
+                  onChange={(e) => setCreditContractCustomer({ ...creditContractCustomer, municipality: e.target.value })}
+                  disabled={!creditContractCustomer.department}
+                  style={{ width: '100%', padding: 10, borderRadius: 8, background: 'var(--modal)', color: 'var(--text)', border: '1px solid var(--border)' }}
+                >
+                  <option value="">
+                    {creditContractCustomer.department ? 'Selecciona un municipio…' : 'Selecciona primero un departamento…'}
+                  </option>
+                  {guatemalaMunicipalities.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div style={{ gridColumn: isPhoneViewport ? 'auto' : '1 / span 2' }}>
+                <label style={{ display: 'block', marginBottom: 6, fontWeight: 700 }}>Tiempo de garantía</label>
+                <input
+                  value={creditContractWarrantyTime}
+                  onChange={(e) => setCreditContractWarrantyTime(e.target.value)}
+                  placeholder="Ej: 30 días / 3 meses"
+                  style={{ width: '100%' }}
+                />
+              </div>
+            </div>
+
+            <div style={{ marginTop: 18, borderTop: '1px solid var(--border)', paddingTop: 14 }}>
+              <div style={{ fontWeight: 800, marginBottom: 10 }}>Referencias</div>
+              <div style={{ display: 'grid', gap: 10 }}>
+                {creditContractRefs.map((r, idx) => (
+                  <div key={idx} style={{ display: 'grid', gridTemplateColumns: isPhoneViewport ? '1fr' : '70px 1fr 220px', gap: 10, alignItems: 'center' }}>
+                    <div style={{ fontWeight: 800, color: 'var(--muted)' }}>#{idx + 1}</div>
+                    <input
+                      value={r.name}
+                      placeholder="Nombre"
+                      onChange={(e) => {
+                        const next = creditContractRefs.map((x, i) => i === idx ? { ...x, name: e.target.value } : x)
+                        setCreditContractRefs(next)
+                      }}
+                      style={{ width: '100%' }}
+                    />
+                    <input
+                      value={r.phone}
+                      placeholder="Tel/Cel"
+                      onChange={(e) => {
+                        const next = creditContractRefs.map((x, i) => i === idx ? { ...x, phone: e.target.value } : x)
+                        setCreditContractRefs(next)
+                      }}
+                      style={{ width: '100%' }}
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ marginTop: 18, borderTop: '1px solid var(--border)', paddingTop: 14 }}>
+              <div style={{ fontWeight: 800, marginBottom: 10 }}>Firma del comprador *</div>
+              <SignaturePad onChange={setCreditContractSignatureFile} height={180} />
+              {creditContractSignatureFile && (
+                <div style={{ marginTop: 8, fontSize: 12, color: 'var(--muted)' }}>
+                  {creditContractSignatureFile.name}
+                </div>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, flexWrap: 'wrap', flexDirection: isPhoneViewport ? 'column' : 'row', marginTop: 18 }}>
+              <button
+                type="button"
+                onClick={() => { setCreditContractModalOpen(false); setCreditContractSignatureFile(null) }}
+                className="btn-secondary"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={submitCreditContract}
+                className="btn-primary"
+              >
+                Guardar contrato
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Customer Modal */}
       {isCustomerModalOpen && (
         <div className="modal-overlay" style={{
@@ -2539,6 +3752,150 @@ export default function POS({ mode = 'sale' }: { mode?: POSMode }) {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {isServerDraftsOpen && (
+        <div className="modal-overlay" style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(0,0,0,0.5)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 1000
+        }}>
+          <div className="modal-content" style={{
+            backgroundColor: 'var(--modal)',
+            padding: 20,
+            borderRadius: 16,
+            width: '100%',
+            maxWidth: 760,
+            maxHeight: '84vh',
+            overflow: 'hidden',
+            boxShadow: '0 4px 6px rgba(0,0,0,0.1)',
+            border: '1px solid var(--border)',
+            color: 'var(--text)',
+            display: 'flex',
+            flexDirection: 'column',
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+              <div>
+                <div style={{ fontWeight: 900, fontSize: '1.05rem' }}>Borradores (Servidor)</div>
+                <div style={{ fontSize: 12, color: 'var(--muted)' }}>{serverDrafts.length} registro(s)</div>
+              </div>
+              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                <button
+                  type="button"
+                  onClick={loadServerDrafts}
+                  disabled={serverDraftsLoading}
+                  style={{
+                    padding: '8px 12px',
+                    background: 'var(--surface)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 10,
+                    color: 'var(--text)',
+                    cursor: serverDraftsLoading ? 'not-allowed' : 'pointer',
+                    fontWeight: 800,
+                    opacity: serverDraftsLoading ? 0.7 : 1
+                  }}
+                >
+                  Actualizar
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsServerDraftsOpen(false)}
+                  style={{
+                    padding: '8px 12px',
+                    background: 'transparent',
+                    border: '1px solid var(--border)',
+                    borderRadius: 10,
+                    color: 'var(--text)',
+                    cursor: 'pointer',
+                    fontWeight: 800
+                  }}
+                >
+                  Cerrar
+                </button>
+              </div>
+            </div>
+
+            <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {serverDraftsLoading ? (
+                <div style={{ color: 'var(--muted)', padding: 14 }}>Cargando...</div>
+              ) : serverDrafts.length === 0 ? (
+                <div style={{ color: 'var(--muted)', padding: 14 }}>Sin borradores.</div>
+              ) : (
+                serverDrafts.map(draft => (
+                  <div key={draft.id} style={{ border: '1px solid var(--border)', borderRadius: 12, padding: 12, background: 'var(--bg)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap' }}>
+                      <div style={{ minWidth: 220 }}>
+                        <div style={{ fontWeight: 900 }}>#{draft.id} {draft.doc_no ? `(${draft.doc_no})` : ''}</div>
+                        <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+                          {draft.customer_name || 'Sin cliente'}{draft.seller_name ? ` | ${draft.seller_name}` : ''}
+                        </div>
+                        {draft.created_at && (
+                          <div style={{ fontSize: 12, color: 'var(--muted)' }}>{String(draft.created_at).replace('T', ' ').slice(0, 19)}</div>
+                        )}
+                      </div>
+
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                        <div style={{ fontWeight: 900, whiteSpace: 'nowrap' }}>{formatMoney(Number(draft.total || 0))}</div>
+                        <button
+                          type="button"
+                          onClick={() => handleLoadServerDraft(draft.id)}
+                          style={{
+                            padding: '8px 12px',
+                            background: 'rgba(37, 99, 235, 0.12)',
+                            border: '1px solid rgba(37, 99, 235, 0.24)',
+                            borderRadius: 10,
+                            color: '#2563eb',
+                            cursor: 'pointer',
+                            fontWeight: 900
+                          }}
+                        >
+                          Retomar
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleSendServerDraftToCashier(draft.id)}
+                          style={{
+                            padding: '8px 12px',
+                            background: 'rgba(245, 158, 11, 0.12)',
+                            border: '1px solid rgba(245, 158, 11, 0.28)',
+                            borderRadius: 10,
+                            color: '#f59e0b',
+                            cursor: 'pointer',
+                            fontWeight: 900
+                          }}
+                        >
+                          Enviar a caja
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleCancelServerDraft(draft.id)}
+                          style={{
+                            padding: '8px 12px',
+                            background: 'rgba(239, 68, 68, 0.1)',
+                            border: '1px solid rgba(239, 68, 68, 0.24)',
+                            borderRadius: 10,
+                            color: '#ef4444',
+                            cursor: 'pointer',
+                            fontWeight: 900
+                          }}
+                        >
+                          Cancelar
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -2823,7 +4180,7 @@ export default function POS({ mode = 'sale' }: { mode?: POSMode }) {
       )}
 
       {/* Cash Register Closed Warning */}
-      {isCashOpen === false && (
+      {canOperateCash && isCashOpen === false && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 2000 }}>
           <div style={{ background: 'var(--modal)', padding: 30, borderRadius: 16, width: 400, textAlign: 'center', boxShadow: '0 10px 40px rgba(0,0,0,0.5)', border: '1px solid var(--border)' }}>
             <div style={{ marginBottom: 15, display: 'flex', justifyContent: 'center' }}>

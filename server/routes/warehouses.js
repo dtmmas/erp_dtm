@@ -4,12 +4,19 @@ import { getPool } from '../db.js'
 
 const router = express.Router()
 
+function userHasPermission(user, permission) {
+  if (isAdminUser(user)) return true
+  return Array.isArray(user?.permissions) && user.permissions.includes(permission)
+}
+
 async function ensureWarehousesTable(pool) {
   await pool.query(`CREATE TABLE IF NOT EXISTS warehouses (
     id INT AUTO_INCREMENT PRIMARY KEY,
     name VARCHAR(120) NOT NULL UNIQUE,
     type ENUM('ALMACEN','TIENDA') NOT NULL DEFAULT 'ALMACEN',
     address VARCHAR(255),
+    contract_phone VARCHAR(60),
+    contract_facebook VARCHAR(120),
     status ENUM('ACTIVO','INACTIVO') NOT NULL DEFAULT 'ACTIVO'
   )`)
 }
@@ -17,6 +24,9 @@ async function ensureWarehousesTable(pool) {
 // Listar almacenes
 router.get('/', authMiddleware, async (req, res) => {
   try {
+    if (!userHasPermission(req.user, 'warehouses:read')) {
+      return res.status(403).json({ error: 'Forbidden: Missing permission warehouses:read' })
+    }
     const pool = await getPool()
     await ensureWarehousesTable(pool)
     const isAdmin = isAdminUser(req.user)
@@ -25,14 +35,14 @@ router.get('/', authMiddleware, async (req, res) => {
 
     let rows = []
     if (isAdmin) {
-      ;[rows] = await pool.query('SELECT id, name, type, address, status FROM warehouses ORDER BY name ASC')
+      ;[rows] = await pool.query('SELECT id, name, type, address, contract_phone, contract_facebook, status FROM warehouses ORDER BY name ASC')
     } else if (mode === 'transfer' && userWarehouseId) {
       ;[rows] = await pool.query(
-        'SELECT id, name, type, address, status FROM warehouses WHERE status = "ACTIVO" ORDER BY name ASC'
+        'SELECT id, name, type, address, contract_phone, contract_facebook, status FROM warehouses WHERE status = "ACTIVO" ORDER BY name ASC'
       )
     } else if (userWarehouseId) {
       ;[rows] = await pool.query(
-        'SELECT id, name, type, address, status FROM warehouses WHERE id = ? LIMIT 1',
+        'SELECT id, name, type, address, contract_phone, contract_facebook, status FROM warehouses WHERE id = ? LIMIT 1',
         [userWarehouseId]
       )
     }
@@ -47,7 +57,7 @@ router.get('/', authMiddleware, async (req, res) => {
 // Crear almacén
 router.post('/', authMiddleware, roleMiddleware(['ADMIN','ALMACEN']), async (req, res) => {
   try {
-    let { name, type, address, status } = req.body
+    let { name, type, address, contract_phone, contract_facebook, status } = req.body
     name = (name || '').trim()
     if (!name) return res.status(400).json({ error: 'Nombre requerido' })
     
@@ -60,10 +70,10 @@ router.post('/', authMiddleware, roleMiddleware(['ADMIN','ALMACEN']), async (req
     }
     
     const [result] = await pool.query(
-      'INSERT INTO warehouses (name, type, address, status) VALUES (?, ?, ?, ?)',
-      [name, type || 'ALMACEN', address || null, status || 'ACTIVO']
+      'INSERT INTO warehouses (name, type, address, contract_phone, contract_facebook, status) VALUES (?, ?, ?, ?, ?, ?)',
+      [name, type || 'ALMACEN', address || null, contract_phone || null, contract_facebook || null, status || 'ACTIVO']
     )
-    return res.status(201).json({ id: result.insertId, name, type, address, status })
+    return res.status(201).json({ id: result.insertId, name, type, address, contract_phone, contract_facebook, status })
   } catch (err) {
     console.error('Warehouses POST error:', err)
     return res.status(500).json({ error: 'Server error' })
@@ -74,7 +84,7 @@ router.post('/', authMiddleware, roleMiddleware(['ADMIN','ALMACEN']), async (req
 router.put('/:id', authMiddleware, roleMiddleware(['ADMIN','ALMACEN']), async (req, res) => {
   try {
     const id = Number(req.params.id)
-    let { name, type, address, status } = req.body
+    let { name, type, address, contract_phone, contract_facebook, status } = req.body
     name = (name || '').trim()
     if (!name) return res.status(400).json({ error: 'Nombre requerido' })
     
@@ -87,10 +97,10 @@ router.put('/:id', authMiddleware, roleMiddleware(['ADMIN','ALMACEN']), async (r
     }
     
     await pool.query(
-      'UPDATE warehouses SET name = ?, type = ?, address = ?, status = ? WHERE id = ?',
-      [name, type || 'ALMACEN', address || null, status || 'ACTIVO', id]
+      'UPDATE warehouses SET name = ?, type = ?, address = ?, contract_phone = ?, contract_facebook = ?, status = ? WHERE id = ?',
+      [name, type || 'ALMACEN', address || null, contract_phone || null, contract_facebook || null, status || 'ACTIVO', id]
     )
-    return res.json({ id, name, type, address, status })
+    return res.json({ id, name, type, address, contract_phone, contract_facebook, status })
   } catch (err) {
     console.error('Warehouses PUT error:', err)
     return res.status(500).json({ error: 'Server error' })

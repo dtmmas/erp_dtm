@@ -72,8 +72,8 @@ async function migrateRBAC() {
     { code: 'sales:read', desc: 'Ver historial de ventas' },
     { code: 'sales:create', desc: 'Realizar ventas (POS)' },
     { code: 'sales:cancel', desc: 'Anular ventas' },
-    { code: 'credits:read', desc: 'Ver créditos' },
-    { code: 'credits:write', desc: 'Administrar créditos' },
+    { code: 'credits:read', desc: 'Reporte de créditos' },
+    { code: 'credits:write', desc: 'Gestión de créditos' },
     { code: 'config:read', desc: 'Ver configuración' },
     { code: 'config:write', desc: 'Editar configuración' },
     { code: 'reports:read', desc: 'Ver reportes' },
@@ -88,6 +88,7 @@ async function migrateRBAC() {
   const roles = [
     { name: 'ADMIN', desc: 'Administrador total' },
     { name: 'CAJERO', desc: 'Cajero punto de venta' },
+    { name: 'VENDEDOR', desc: 'Vendedor con acceso a POS sin operaciones de caja' },
     { name: 'ALMACEN', desc: 'Encargado de inventario' },
   ]
 
@@ -127,6 +128,16 @@ async function migrateRBAC() {
   await assignPerms('CAJERO', [
     'sales:create', 'sales:read', 'customers:read', 'customers:write', 
     'products:read', 'credits:read', 'credits:write'
+  ])
+
+  // Vendedor
+  await assignPerms('VENDEDOR', [
+    'pos:access',
+    'sales:create',
+    'sales:read',
+    'customers:read',
+    'customers:write',
+    'products:read'
   ])
 
   // Almacen

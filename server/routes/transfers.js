@@ -5,6 +5,11 @@ import { registerMovement } from '../services/inventory.js'
 
 const router = express.Router()
 
+function userHasPermission(user, permission) {
+  if (isAdminUser(user)) return true
+  return Array.isArray(user?.permissions) && user.permissions.includes(permission)
+}
+
 // Helper to check numeric validity
 function isValidNumber(n) {
   return typeof n === 'number' && !isNaN(n) && n > 0
@@ -74,6 +79,9 @@ async function getAllowedTrackedValues(conn, { productId, warehouseId, table, va
 // GET /transfers - List all transfers
 router.get('/', authMiddleware, async (req, res) => {
   try {
+    if (!userHasPermission(req.user, 'transfers:read')) {
+      return res.status(403).json({ error: 'Forbidden: Missing permission transfers:read' })
+    }
     const pool = await getPool()
     await ensureTransferItemsDestinationTypeColumn(pool)
     await ensureTransferItemsTrackedColumns(pool)
@@ -117,6 +125,9 @@ router.get('/', authMiddleware, async (req, res) => {
 // GET /transfers/:id - Get details
 router.get('/:id', authMiddleware, async (req, res) => {
   try {
+    if (!userHasPermission(req.user, 'transfers:read')) {
+      return res.status(403).json({ error: 'Forbidden: Missing permission transfers:read' })
+    }
     const id = Number(req.params.id)
     const pool = await getPool()
     await ensureTransferItemsDestinationTypeColumn(pool)
